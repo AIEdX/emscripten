@@ -5361,6 +5361,14 @@ main( int argv, char ** argc ) {
     self.emcc_args += ['-lnodefs.js']
     self.do_runf(test_file('fs/test_nodefs_nofollow.c'), 'success', js_engines=[config.NODE_JS])
 
+  @no_windows('no symlink support on windows')
+  def test_fs_noderawfs_nofollow(self):
+    self.set_setting('NODERAWFS')
+    create_file('filename', 'foo')
+    os.symlink('filename', 'linkname')
+    self.emcc_args += ['-lnodefs.js']
+    self.do_runf(test_file('fs/test_noderawfs_nofollow.c'), 'success', js_engines=[config.NODE_JS])
+
   def test_fs_trackingdelegate(self):
     self.set_setting('FS_DEBUG')
     self.do_run_in_out_file_test('fs/test_trackingdelegate.c')
@@ -8184,9 +8192,12 @@ NODEFS is no longer included by default; build with -lnodefs.js
   @parameterized({
     'fsanitize_undefined': (['-fsanitize=undefined'],),
     'fsanitize_null': (['-fsanitize=null'],),
+    'dylink': (['-fsanitize=null', '-sMAIN_MODULE=2'],),
   })
   @no_wasm2js('TODO: sanitizers in wasm2js')
   def test_ubsan_full_null_ref(self, args):
+    if is_sanitizing(self.emcc_args):
+      self.skipTest('test is specific to null sanitizer')
     self.emcc_args += args
     self.do_runf(test_file('core/test_ubsan_full_null_ref.cpp'),
                  assert_all=True, expected_output=[

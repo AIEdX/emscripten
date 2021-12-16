@@ -954,6 +954,20 @@ def move_file(src, dst):
   shutil.move(src, dst)
 
 
+# Returns the subresource location for run-time access
+def get_subresource_location(path, data_uri=None):
+  if data_uri is None:
+    data_uri = settings.SINGLE_FILE
+  if data_uri:
+    # if the path does not exist, then there is no data to encode
+    if not os.path.exists(path):
+      return ''
+    data = base64.b64encode(utils.read_binary(path))
+    return 'data:application/octet-stream;base64,' + data.decode('ascii')
+  else:
+    return os.path.basename(path)
+
+
 run_via_emxx = False
 
 
@@ -961,11 +975,26 @@ run_via_emxx = False
 # Main run() function
 #
 def run(args):
+  if run_via_emxx:
+    clang = shared.CLANG_CXX
+  else:
+    clang = shared.CLANG_CC
+
+  # Special case the handling of `-v` because it has a special/different meaning
+  # when used with no other arguments.  In particular, we must handle this early
+  # on, before we inject EMCC_CFLAGS.  This is because tools like cmake and
+  # autoconf will run `emcc -v` to determine the compiler version and we don't
+  # want that to break for users of EMCC_CFLAGS.
+  if len(args) == 2 and args[1] == '-v':
+    # autoconf likes to see 'GNU' in the output to enable shared object support
+    print(version_string(), file=sys.stderr)
+    return shared.check_call([clang, '-v'] + get_clang_flags(), check=False).returncode
+
   # Additional compiler flags that we treat as if they were passed to us on the
   # commandline
   EMCC_CFLAGS = os.environ.get('EMCC_CFLAGS')
   if EMCC_CFLAGS:
-    args.extend(shlex.split(EMCC_CFLAGS))
+    args += shlex.split(EMCC_CFLAGS)
   EMMAKEN_CFLAGS = os.environ.get('EMMAKEN_CFLAGS')
   if EMMAKEN_CFLAGS:
     args += shlex.split(EMMAKEN_CFLAGS)
@@ -1011,16 +1040,6 @@ This is free and open source software under the MIT license.
 There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
 ''')
     return 0
-
-  if run_via_emxx:
-    clang = shared.CLANG_CXX
-  else:
-    clang = shared.CLANG_CC
-
-  if len(args) == 1 and args[0] == '-v': # -v with no inputs
-    # autoconf likes to see 'GNU' in the output to enable shared object support
-    print(version_string(), file=sys.stderr)
-    return shared.check_call([clang, '-v'] + get_clang_flags(), check=False).returncode
 
   if '-dumpmachine' in args:
     print(get_llvm_target())
@@ -1730,8 +1749,8 @@ def phase_linker_setup(options, state, newargs, settings_map):
   settings.ASYNCIFY_REMOVE = unmangle_symbols_from_cmdline(settings.ASYNCIFY_REMOVE)
   settings.ASYNCIFY_ONLY = unmangle_symbols_from_cmdline(settings.ASYNCIFY_ONLY)
 
-  if state.mode == Mode.COMPILE_AND_LINK and final_suffix in ('.o', '.bc', '.so', '.dylib') and not settings.SIDE_MODULE:
-    diagnostics.warning('emcc', 'generating an executable with an object extension (%s).  If you meant to build an object file please use `-c, `-r`, or `-shared`' % final_suffix)
+  if options.oformat != OFormat.OBJECT and final_suffix in ('.o', '.bc', '.so', '.dylib') and not settings.SIDE_MODULE:
+    diagnostics.warning('emcc', 'object file output extension (%s) used for non-object output.  If you meant to build an object file please use `-c, `-r`, or `-shared`' % final_suffix)
 
   if settings.SUPPORT_BIG_ENDIAN:
     settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += [
@@ -1951,7 +1970,6 @@ def phase_linker_setup(options, state, newargs, settings_map):
       '__emscripten_thread_init',
       '__emscripten_thread_exit',
       '_emscripten_tls_init',
-      '_emscripten_futex_wake',
       '_emscripten_current_thread_process_queued_calls',
       '_pthread_self',
     ]
@@ -2159,8 +2177,6 @@ def phase_linker_setup(options, state, newargs, settings_map):
         'emscripten_builtin_memalign',
         'emscripten_builtin_malloc',
         'emscripten_builtin_free',
-        '__heap_base',
-        '__global_base'
     ]
 
   if settings.USE_OFFSET_CONVERTER and settings.WASM2JS:
@@ -2338,7 +2354,7 @@ def phase_linker_setup(options, state, newargs, settings_map):
     if settings.SINGLE_FILE:
       exit_with_error('NODE_CODE_CACHING saves a file on the side and is not compatible with SINGLE_FILE')
 
-  if not shared.JS.isidentifier(settings.EXPORT_NAME):
+  if not js_manipulation.isidentifier(settings.EXPORT_NAME):
     exit_with_error(f'EXPORT_NAME is not a valid JS identifier: `{settings.EXPORT_NAME}`')
 
   if settings.EMSCRIPTEN_TRACING and settings.ALLOW_MEMORY_GROWTH:
@@ -2729,7 +2745,7 @@ def phase_final_emitting(options, state, target, wasm_target, memfile):
   if settings.MINIMAL_RUNTIME == 2 and settings.USE_CLOSURE_COMPILER and settings.DEBUG_LEVEL == 0 and not settings.SINGLE_FILE:
     # Process .js runtime file. Note that we need to handle the license text
     # here, so that it will not confuse the hacky script.
-    shared.JS.handle_license(final_js)
+    js_manipulation.handle_license(final_js)
     shared.run_process([shared.PYTHON, utils.path_from_root('tools/hacky_postprocess_around_closure_limitations.py'), final_js])
 
   # Unmangle previously mangled `import.meta` references in both main code and libraries.
@@ -2751,7 +2767,7 @@ def phase_final_emitting(options, state, target, wasm_target, memfile):
       f.write(options.extern_post_js)
     save_intermediate('extern-pre-post')
 
-  shared.JS.handle_license(final_js)
+  js_manipulation.handle_license(final_js)
 
   js_target = state.js_target
 
@@ -3309,7 +3325,7 @@ def phase_binaryen(target, options, wasm_target):
     if settings.MINIMAL_RUNTIME:
       js = do_replace(js, '<<< WASM_BINARY_DATA >>>', base64_encode(read_binary(wasm_target)))
     else:
-      js = do_replace(js, '<<< WASM_BINARY_FILE >>>', shared.JS.get_subresource_location(wasm_target))
+      js = do_replace(js, '<<< WASM_BINARY_FILE >>>', get_subresource_location(wasm_target))
     shared.try_delete(wasm_target)
     write_file(final_js, js)
 
@@ -3425,7 +3441,7 @@ def generate_traditional_runtime_html(target, options, js_target, target_basenam
   var filename = '%s';
   if ((',' + window.location.search.substr(1) + ',').indexOf(',noProxy,') < 0) {
     console.log('running code in a web worker');
-''' % shared.JS.get_subresource_location(proxy_worker_filename)) + worker_js + '''
+''' % get_subresource_location(proxy_worker_filename)) + worker_js + '''
   } else {
     console.log('running code on the main thread');
     var fileBytes = tryParseAsDataURI(filename);
@@ -3454,7 +3470,7 @@ def generate_traditional_runtime_html(target, options, js_target, target_basenam
           meminitXHR.open('GET', memoryInitializer, true);
           meminitXHR.responseType = 'arraybuffer';
           meminitXHR.send(null);
-''' % shared.JS.get_subresource_location(memfile)) + script.inline
+''' % get_subresource_location(memfile)) + script.inline
 
     if not settings.WASM_ASYNC_COMPILATION:
       # We need to load the wasm file before anything else, it has to be synchronously ready TODO: optimize
@@ -3476,7 +3492,7 @@ def generate_traditional_runtime_html(target, options, js_target, target_basenam
 %s
           };
           wasmXHR.send(null);
-''' % (shared.JS.get_subresource_location(wasm_target), script.inline)
+''' % (get_subresource_location(wasm_target), script.inline)
 
     if settings.WASM == 2:
       # If target browser does not support WebAssembly, we need to load the .wasm.js file before the main .js file.
@@ -3496,7 +3512,7 @@ def generate_traditional_runtime_html(target, options, js_target, target_basenam
             // Current browser supports Wasm, proceed with loading the main JS runtime.
             loadMainJs();
           }
-''' % (script.inline, shared.JS.get_subresource_location(wasm_target) + '.js')
+''' % (script.inline, get_subresource_location(wasm_target) + '.js')
 
   # when script.inline isn't empty, add required helper functions such as tryParseAsDataURI
   if script.inline:
@@ -3593,7 +3609,7 @@ def generate_html(target, options, js_target, target_basename,
 def generate_worker_js(target, js_target, target_basename):
   # compiler output is embedded as base64
   if settings.SINGLE_FILE:
-    proxy_worker_filename = shared.JS.get_subresource_location(js_target)
+    proxy_worker_filename = get_subresource_location(js_target)
 
   # compiler output goes in .worker.js file
   else:
@@ -3812,7 +3828,11 @@ def parse_value(text, expect_list):
       return parse_string_list(text)
 
   try:
-    return int(text)
+    if text.startswith('0x'):
+      base = 16
+    else:
+      base = 10
+    return int(text, base)
   except ValueError:
     return parse_string_value(text)
 

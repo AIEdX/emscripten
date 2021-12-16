@@ -36,7 +36,7 @@ def files_in_path(path, filenames):
 def glob_in_path(path, glob_pattern, excludes=()):
   srcdir = utils.path_from_root(path)
   files = iglob(os.path.join(srcdir, glob_pattern), recursive=True)
-  return [f for f in files if os.path.basename(f) not in excludes]
+  return sorted(f for f in files if os.path.basename(f) not in excludes)
 
 
 def get_base_cflags(force_object_files=False):
@@ -75,6 +75,7 @@ def run_build_commands(commands):
 def create_lib(libname, inputs):
   """Create a library from a set of input objects."""
   suffix = shared.suffix(libname)
+  inputs = sorted(inputs, key=lambda x: os.path.basename(x))
   if suffix in ('.bc', '.o'):
     if len(inputs) == 1:
       if inputs[0] != libname:
@@ -827,6 +828,8 @@ class libc(DebugLibrary, AsanInstrumentedLibrary, MuslInternalLibrary, MTLibrary
           'pthread_testcancel.c',
           'emscripten_proxy_main.c',
           'emscripten_thread_state.S',
+          'emscripten_futex_wait.c',
+          'emscripten_futex_wake.c',
         ])
     else:
       ignore += ['thread']
@@ -1379,10 +1382,10 @@ class libasmfs(MTLibrary):
     return True
 
 
-class libwasmfs(MTLibrary, DebugLibrary):
+class libwasmfs(MTLibrary, DebugLibrary, AsanInstrumentedLibrary):
   name = 'libwasmfs'
 
-  cflags = ['-fno-exceptions', '-std=c++17']
+  cflags = ['-O2', '-fno-exceptions', '-std=c++17']
 
   def get_files(self):
     return files_in_path(
@@ -1446,7 +1449,7 @@ class SanitizerLibrary(CompilerRTLibrary, MTLibrary):
 class libubsan_rt(SanitizerLibrary):
   name = 'libubsan_rt'
 
-  cflags = ['-DUBSAN_CAN_USE_CXXABI']
+  cflags = ['-O2', '-DUBSAN_CAN_USE_CXXABI']
   src_dir = 'system/lib/compiler-rt/lib/ubsan'
 
 
@@ -1475,7 +1478,7 @@ class libasan_js(Library):
   name = 'libasan_js'
   never_force = True
 
-  cflags = ['-fsanitize=address']
+  cflags = ['-O2', '-fsanitize=address']
 
   src_dir = 'system/lib'
   src_files = ['asan_js.c']
