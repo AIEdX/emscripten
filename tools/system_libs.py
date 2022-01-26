@@ -917,8 +917,7 @@ class libc(MuslInternalLibrary,
 
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/linux',
-        filenames=['getdents.c'])
-
+        filenames=['getdents.c', 'gettid.c'])
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/env',
         filenames=['__environ.c', 'getenv.c', 'putenv.c', 'setenv.c', 'unsetenv.c'])
@@ -934,10 +933,6 @@ class libc(MuslInternalLibrary,
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/ldso',
         filenames=['dlerror.c', 'dlsym.c', 'dlclose.c'])
-
-    libc_files += files_in_path(
-        path='system/lib/libc/musl/src/linux',
-        filenames=['gettid.c'])
 
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/signal',
@@ -1428,7 +1423,10 @@ class libwasmfs(MTLibrary, DebugLibrary, AsanInstrumentedLibrary):
   def get_files(self):
     return files_in_path(
         path='system/lib/wasmfs',
-        filenames=['syscalls.cpp', 'file_table.cpp', 'file.cpp', 'wasmfs.cpp', 'streams.cpp', 'memory_file.cpp', 'memory_file_backend.cpp', 'js_file_backend.cpp', 'proxied_file_backend.cpp'])
+        filenames=['syscalls.cpp', 'file_table.cpp', 'file.cpp', 'wasmfs.cpp',
+                   'streams.cpp', 'memory_file.cpp', 'memory_file_backend.cpp',
+                   'js_file_backend.cpp', 'proxied_file_backend.cpp',
+                   'js_api.cpp'])
 
   def can_use(self):
     return settings.WASMFS

@@ -461,6 +461,9 @@ There is NO warranty; not even for MERCHANTABILITY or FITNESS FOR A PARTICULAR P
   def test_tsearch(self):
     self.do_other_test('test_tsearch.c')
 
+  def test_libc_progname(self):
+    self.do_other_test('test_libc_progname.c')
+
   def test_combining_object_files(self):
     # Compiling two files with -c will generate separate object files
     self.run_process([EMCC, test_file('twopart_main.cpp'), test_file('twopart_side.c'), '-c'])
@@ -1478,12 +1481,15 @@ int f() {
   })
   def test_include_file(self, args):
     create_file('somefile.txt', 'hello from a file with lots of data and stuff in it thank you very much')
-    create_file('main.cpp', r'''
+    create_file('main.c', r'''
+      #include <assert.h>
       #include <stdio.h>
       int main() {
         FILE *f = fopen("somefile.txt", "r");
+        assert(f);
         char buf[100];
-        fread(buf, 1, 20, f);
+        int rtn = fread(buf, 1, 20, f);
+        assert(rtn == 20);
         buf[20] = 0;
         fclose(f);
         printf("|%s|\n", buf);
@@ -1491,12 +1497,16 @@ int f() {
       }
     ''')
 
-    self.run_process([EMXX, 'main.cpp'] + args)
+    self.run_process([EMCC, 'main.c'] + args)
     # run in node.js to ensure we verify that file preloading works there
     result = self.run_js('a.out.js', engine=config.NODE_JS)
     self.assertContained('|hello from a file wi|', result)
 
-  def test_embed_file_dup(self):
+  @parameterized({
+    '': ([],),
+    'wasmfs': (['-sWASMFS'],),
+  })
+  def test_embed_file_dup(self, args):
     ensure_dir(self.in_dir('tst', 'test1'))
     ensure_dir(self.in_dir('tst', 'test2'))
 
@@ -1523,7 +1533,7 @@ int f() {
       }
     ''')
 
-    self.run_process([EMXX, 'main.cpp', '--embed-file', 'tst'])
+    self.run_process([EMXX, 'main.cpp', '--embed-file', 'tst'] + args)
     self.assertContained('|frist|\n|sacond|\n|thard|\n', self.run_js('a.out.js'))
 
   def test_exclude_file(self):
@@ -2497,18 +2507,33 @@ int f() {
     os.chdir('subdir')
     create_file('data2.txt', 'data2')
 
+    def check(text):
+      self.assertGreater(len(text), 0)
+      empty_lines = 0
+      # check the generated is relatively tidy
+      for line in text.splitlines():
+        if line and line[-1].isspace():
+          self.fail('output contains trailing whitespace: `%s`' % line)
+
+        if line.strip():
+          empty_lines = 0
+        else:
+          empty_lines += 1
+          if empty_lines > 1:
+            self.fail('output contains more then one empty line in row')
+
     # relative path to below the current dir is invalid
     stderr = self.expect_fail([FILE_PACKAGER, 'test.data', '--preload', '../data1.txt'])
     self.assertContained('below the current directory', stderr)
 
     # relative path that ends up under us is cool
     proc = self.run_process([FILE_PACKAGER, 'test.data', '--preload', '../subdir/data2.txt'], stderr=PIPE, stdout=PIPE)
-    self.assertGreater(len(proc.stdout), 0)
     self.assertNotContained('below the current directory', proc.stderr)
+    check(proc.stdout)
 
     # direct path leads to the same code being generated - relative path does not make us do anything different
     proc2 = self.run_process([FILE_PACKAGER, 'test.data', '--preload', 'data2.txt'], stderr=PIPE, stdout=PIPE)
-    self.assertGreater(len(proc2.stdout), 0)
+    check(proc2.stdout)
     self.assertNotContained('below the current directory', proc2.stderr)
 
     def clean(txt):
@@ -2569,7 +2594,7 @@ int f() {
     assert json.dumps("direc'tory") in proc.stdout
 
   def test_file_packager_mention_FORCE_FILESYSTEM(self):
-    MESSAGE = 'Remember to build the main file with  -s FORCE_FILESYSTEM=1  so that it includes support for loading this file package'
+    MESSAGE = 'Remember to build the main file with `-sFORCE_FILESYSTEM` so that it includes support for loading this file package'
     create_file('data.txt', 'data1')
     # mention when running standalone
     err = self.run_process([FILE_PACKAGER, 'test.data', '--preload', 'data.txt'], stdout=PIPE, stderr=PIPE).stderr
@@ -2583,6 +2608,32 @@ int f() {
     result = self.run_process([FILE_PACKAGER, 'test.data', '--js-output=test.data'], check=False, stdout=PIPE, stderr=PIPE)
     self.assertEqual(result.returncode, 1)
     self.assertContained(MESSAGE, result.stderr)
+
+  def test_file_packager_embed(self):
+    create_file('data.txt', 'hello data')
+
+    # Without --obj-output we issue a warning
+    err = self.run_process([FILE_PACKAGER, 'test.data', '--embed', 'data.txt', '--js-output=data.js'], stderr=PIPE).stderr
+    self.assertContained('--obj-output is recommended when using --embed', err)
+
+    self.run_process([FILE_PACKAGER, 'test.data', '--embed', 'data.txt', '--obj-output=data.o', '--js-output=data.js'])
+
+    create_file('test.c', '''
+    #include <stdio.h>
+
+    int main() {
+      FILE* f = fopen("data.txt", "r");
+      char buf[64];
+      int rtn = fread(buf, 1, 64, f);
+      buf[rtn] = '\\0';
+      fclose(f);
+      printf("%s\\n", buf);
+      return 0;
+    }
+    ''')
+    self.run_process([EMCC, '--pre-js=data.js', 'test.c', 'data.o', '-sFORCE_FILESYSTEM'])
+    output = self.run_js('a.out.js')
+    self.assertContained('hello data', output)
 
   def test_headless(self):
     shutil.copyfile(test_file('screenshot.png'), 'example.png')
@@ -5759,18 +5810,17 @@ int main() {
   }
   return 0;
 }
-
 ''')
-
-    self.run_process([EMCC, '-o', 'libhello1.wasm', 'hello1.c', '-sSIDE_MODULE', '-sEXPORT_ALL'])
-    self.run_process([EMCC, '-o', 'libhello2.wasm', 'hello2.c', '-sSIDE_MODULE', '-sEXPORT_ALL'])
-    self.run_process([EMCC, '-o', 'libhello3.wasm', 'hello3.c', '-sSIDE_MODULE', '-sEXPORT_ALL'])
-    self.run_process([EMCC, '-o', 'libhello4.wasm', 'hello4.c', '-sSIDE_MODULE', '-sEXPORT_ALL'])
-    self.run_process([EMCC, '-o', 'main.js', 'main.c', '-sMAIN_MODULE', '-sINITIAL_MEMORY=' + str(32 * 1024 * 1024),
+    self.run_process([EMCC, '-o', 'libhello1.wasm', 'hello1.c', '-sSIDE_MODULE'])
+    self.run_process([EMCC, '-o', 'libhello2.wasm', 'hello2.c', '-sSIDE_MODULE'])
+    self.run_process([EMCC, '-o', 'libhello3.wasm', 'hello3.c', '-sSIDE_MODULE'])
+    self.run_process([EMCC, '-o', 'libhello4.wasm', 'hello4.c', '-sSIDE_MODULE'])
+    self.run_process([EMCC, '--profiling-funcs', '-o', 'main.js', 'main.c', '-sMAIN_MODULE=2', '-sINITIAL_MEMORY=32Mb',
                       '--embed-file', 'libhello1.wasm@/lib/libhello1.wasm',
                       '--embed-file', 'libhello2.wasm@/usr/lib/libhello2.wasm',
                       '--embed-file', 'libhello3.wasm@/libhello3.wasm',
                       '--embed-file', 'libhello4.wasm@/usr/local/lib/libhello4.wasm',
+                      'libhello1.wasm', 'libhello2.wasm', 'libhello3.wasm', 'libhello4.wasm', '-sNO_AUTOLOAD_DYLIBS',
                       '--pre-js', 'pre.js'])
     out = self.run_js('main.js')
     self.assertContained('Hello1', out)
@@ -10022,9 +10072,14 @@ Aborted(Module.arguments has been replaced with plain arguments_ (the initial va
       return self.run_js('a.out.js', assert_returncode=NON_ZERO if expect_fail else 0)
 
     # we fail without legacy support
-    self.assertNotContained('hello, world!', test([], expect_fail=True))
+    test([], expect_fail=True)
+
     # but work with it
-    self.assertContained('hello, world!', test(['-sLEGACY_VM_SUPPORT'], expect_fail=False))
+    output = test(['-sLEGACY_VM_SUPPORT'], expect_fail=False)
+    self.assertContained('hello, world!', output)
+
+    # unless we explictly disable polyfills
+    test(['-sLEGACY_VM_SUPPORT', '-sNO_POLYFILL'], expect_fail=True)
 
   def test_webgpu_compiletest(self):
     for args in [[], ['-sASSERTIONS'], ['-sASSERTIONS', '--closure=1'], ['-sMAIN_MODULE=1']]:
@@ -10293,6 +10348,15 @@ int main () {
     # point.
     # We should consider making this a warning since the `_main` export is redundant.
     self.run_process([EMCC, '-sEXPORTED_FUNCTIONS=_main', '-sSTANDALONE_WASM', test_file('core/test_hello_world.c')])
+
+  @require_v8
+  def test_standalone_wasm_exceptions(self):
+    self.set_setting('STANDALONE_WASM')
+    self.set_setting('WASM_BIGINT')
+    self.wasm_engines = []
+    self.emcc_args += ['-fwasm-exceptions']
+    self.v8_args.append('--experimental-wasm-eh')
+    self.do_run_from_file(test_file('core/test_exceptions.cpp'), test_file('core/test_exceptions_caught.out'))
 
   def test_missing_malloc_export(self):
     # we used to include malloc by default. show a clear error in builds with
@@ -11409,3 +11473,6 @@ void foo() {}
   def test_tutorial(self):
     # Ensure that files referenced in Tutorial.rst are buildable
     self.run_process([EMCC, test_file('hello_world_file.cpp')])
+
+  def test_stdint_limits(self):
+    self.do_other_test('test_stdint_limits.c')
