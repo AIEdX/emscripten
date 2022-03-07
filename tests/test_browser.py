@@ -151,17 +151,6 @@ def requires_threads(f):
   return decorated
 
 
-def requires_asmfs(f):
-  assert callable(f)
-
-  def decorated(self, *args, **kwargs):
-    # https://github.com/emscripten-core/emscripten/issues/9534
-    self.skipTest('ASMFS is looking for a maintainer')
-    return f(self, *args, **kwargs)
-
-  return decorated
-
-
 def also_with_threads(f):
   def decorated(self, *args, **kwargs):
     f(self)
@@ -2205,7 +2194,7 @@ void *getBindBuffer() {
     self.btest('sdl_ttf_render_text_solid.c', reference='sdl_ttf_render_text_solid.png', args=['-O2', '-sINITIAL_MEMORY=16MB', '-lSDL', '-lGL'])
 
   def test_sdl_alloctext(self):
-    self.btest('sdl_alloctext.c', expected='1', args=['-O2', '-sINITIAL_MEMORY=16MB', '-lSDL', '-lGL'])
+    self.btest('sdl_alloctext.c', expected='1', args=['-sINITIAL_MEMORY=16MB', '-lSDL', '-lGL'])
 
   def test_sdl_surface_refcount(self):
     self.btest('sdl_surface_refcount.c', args=['-lSDL'], expected='1')
@@ -2491,7 +2480,7 @@ void *getBindBuffer() {
   def test_worker_api_with_pthread_compilation_fails(self):
     self.run_process([EMCC, '-c', '-o', 'hello.o', test_file('hello_world.c')])
     stderr = self.expect_fail([EMCC, 'hello.o', '-o', 'a.js', '-g', '--closure=1', '-sUSE_PTHREADS', '-sBUILD_AS_WORKER=1'])
-    self.assertContained('error: USE_PTHREADS + BUILD_AS_WORKER require separate modes that don\'t work together, see https://github.com/emscripten-core/emscripten/issues/8854', stderr)
+    self.assertContained("USE_PTHREADS + BUILD_AS_WORKER require separate modes that don't work together, see https://github.com/emscripten-core/emscripten/issues/8854", stderr)
 
   def test_emscripten_async_wget2(self):
     self.btest_exit('test_emscripten_async_wget2.cpp')
@@ -3393,6 +3382,11 @@ window.close = function() {
     self.compile_btest([test_file('browser_test_hello_world.c'), '-o', 'test.html', '-sMODULARIZE', '-sMINIMAL_RUNTIME'])
     self.run_browser('test.html', None, '/report_result?0')
 
+  # Tests that when building with -s MINIMAL_RUNTIME=1, the build can use -s EXPORT_NAME=Foo as well.
+  def test_minimal_runtime_export_name(self):
+    self.compile_btest([test_file('browser_test_hello_world.c'), '-o', 'test.html', '-sEXPORT_NAME=Foo', '-sMINIMAL_RUNTIME'])
+    self.run_browser('test.html', None, '/report_result?0')
+
   @requires_sync_compilation
   def test_modularize(self):
     for opts in [
@@ -3486,6 +3480,8 @@ window.close = function() {
   # when compiling with the --preload-file option
   def test_modularize_and_preload_files(self):
     self.set_setting('EXIT_RUNTIME')
+    # TODO(sbc): Fix closure warnings with MODULARIZE + WASM=0
+    self.ldflags.remove('-sCLOSURE_WARNINGS=error')
     # amount of memory different from the default one that will be allocated for the emscripten heap
     totalMemory = 33554432
     for opts in [[], ['-O1'], ['-O2', '-profiling'], ['-O2'], ['-O2', '--closure=1']]:
@@ -4665,66 +4661,6 @@ window.close = function() {
     shutil.copyfile(test_file('gears.png'), 'gears.png')
     self.btest_exit('fetch/idb_delete.cpp', args=['-sUSE_PTHREADS', '-sFETCH_DEBUG', '-sFETCH', '-sWASM=0', '-sPROXY_TO_PTHREAD'])
 
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_hello_file(self):
-    # Test basic file loading and the valid character set for files.
-    ensure_dir('dirrey')
-    shutil.copyfile(test_file('asmfs/hello_file.txt'), Path('dirrey', 'hello file !#$%&\'()+,-.;=@[]^_`{}~ %%.txt'))
-    self.btest_exit('asmfs/hello_file.cpp', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG', '-sPROXY_TO_PTHREAD'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_read_file_twice(self):
-    shutil.copyfile(test_file('asmfs/hello_file.txt'), 'hello_file.txt')
-    self.btest_exit('asmfs/read_file_twice.cpp', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG', '-sPROXY_TO_PTHREAD'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_fopen_write(self):
-    self.btest_exit('asmfs/fopen_write.cpp', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_mkdir_create_unlink_rmdir(self):
-    self.btest_exit('cstdio/test_remove.cpp', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_dirent_test_readdir(self):
-    self.btest_exit('dirent/test_readdir.c', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_dirent_test_readdir_empty(self):
-    self.btest_exit('dirent/test_readdir_empty.c', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_unistd_close(self):
-    self.btest_exit(test_file('unistd/close.c'), 0, args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_unistd_access(self):
-    self.btest_exit(test_file('unistd/access.c'), 0, args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_unistd_unlink(self):
-    # TODO: Once symlinks are supported, remove -DNO_SYMLINK=1
-    self.btest_exit(test_file('unistd/unlink.c'), 0, args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG', '-DNO_SYMLINK=1'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_test_fcntl_open(self):
-    self.btest_exit('fcntl/test_fcntl_open.c', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG', '-sPROXY_TO_PTHREAD'])
-
-  @requires_asmfs
-  @requires_threads
-  def test_asmfs_relative_paths(self):
-    self.btest_exit('asmfs/relative_paths.cpp', args=['-sASMFS', '-sWASM=0', '-sUSE_PTHREADS', '-sFETCH_DEBUG'])
-
   @requires_threads
   def test_pthread_locale(self):
     self.emcc_args.append('-I' + path_from_root('system/lib/libc/musl/src/internal'))
@@ -5079,6 +5015,8 @@ window.close = function() {
     self.btest_exit('webgl_draw_triangle.c', args=['-lGL', '-sENVIRONMENT=web', '-O3', '--closure=1'])
 
   def test_no_declare_asm_module_exports_asmjs(self):
+    # TODO(sbc): Fix closure warnings with MODULARIZE + WASM=0
+    self.ldflags.remove('-sCLOSURE_WARNINGS=error')
     for minimal_runtime in [[], ['-sMINIMAL_RUNTIME']]:
       self.btest(test_file('declare_asm_module_exports.cpp'), '1', args=['-sDECLARE_ASM_MODULE_EXPORTS=0', '-sENVIRONMENT=web', '-O3', '--closure=1', '-sWASM=0'] + minimal_runtime)
 
@@ -5178,6 +5116,21 @@ window.close = function() {
     test(['-sMALLOC=emmalloc-debug'])
     test(['-sMALLOC=emmalloc-memvalidate'])
     test(['-sMALLOC=emmalloc-memvalidate-verbose'])
+
+  @parameterized({
+    # the fetch backend works even on the main thread: we proxy to a background
+    # thread and busy-wait
+    'main_thread': (['-sPTHREAD_POOL_SIZE=1'],),
+    # using proxy_to_pthread also works, of course
+    'proxy_to_pthread': (['-sPROXY_TO_PTHREAD'],),
+  })
+  @requires_threads
+  def test_wasmfs_fetch_backend(self, args):
+    if is_firefox() and '-sPROXY_TO_PTHREAD' not in args:
+      return self.skipTest('ff hangs on the main_thread version. browser bug?')
+    create_file('data.dat', 'hello, fetch')
+    self.btest_exit(test_file('wasmfs/wasmfs_fetch.c'),
+                    args=['-sWASMFS', '-sUSE_PTHREADS'] + args)
 
   @no_firefox('no 4GB support yet')
   def test_zzz_zzz_emmalloc_memgrowth(self, *args):

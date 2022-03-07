@@ -9,6 +9,7 @@ import itertools
 import logging
 import os
 import shutil
+import textwrap
 from enum import IntEnum, auto
 from glob import iglob
 
@@ -54,11 +55,14 @@ def get_base_cflags(force_object_files=False):
 
 def clean_env():
   # building system libraries and ports should be hermetic in that it is not
-  # affected by things like EMMAKEN_CFLAGS which the user may have set.
+  # affected by things like EMCC_CFLAGS which the user may have set.
   # At least one port also uses autoconf (harfbuzz) so we also need to clear
   # CFLAGS/LDFLAGS which we don't want to effect the inner call to configure.
   safe_env = os.environ.copy()
-  for opt in ['CFLAGS', 'CXXFLAGS', 'LDFLAGS', 'EMCC_CFLAGS', 'EMMAKEN_CFLAGS', 'EMMAKEN_JUST_CONFIGURE']:
+  for opt in ['CFLAGS', 'CXXFLAGS', 'LDFLAGS',
+              'EMCC_CFLAGS',
+              'EMCC_FORCE_STDLIBS',
+              'EMCC_ONLY_FORCED_STDLIBS']:
     if opt in safe_env:
       del safe_env[opt]
   return safe_env
@@ -286,7 +290,6 @@ class Library:
     commands = []
     objects = []
     cflags = self.get_cflags()
-    base_flags = get_base_cflags()
     case_insensitive = is_case_insensitive(build_dir)
     for src in self.get_files():
       object_basename = shared.unsuffixed_basename(src)
@@ -306,13 +309,12 @@ class Library:
         cmd = [shared.EMCC]
       else:
         cmd = [shared.EMXX]
+
+      cmd += cflags
       if ext in ('.s', '.S'):
-        cmd += base_flags
         # TODO(sbc) There is an llvm bug that causes a crash when `-g` is used with
         # assembly files that define wasm globals.
-        cmd.remove('-g')
-      else:
-        cmd += cflags
+        cmd = [arg for arg in cmd if arg != '-g']
       cmd = self.customize_build_cmd(cmd, src)
       commands.append(cmd + ['-c', src, '-o', o])
       objects.append(o)
@@ -802,7 +804,7 @@ class libc(MuslInternalLibrary,
     # individual files
     ignore += [
         'memcpy.c', 'memset.c', 'memmove.c', 'getaddrinfo.c', 'getnameinfo.c',
-        'res_query.c', 'res_querydomain.c', 'gai_strerror.c',
+        'res_query.c', 'res_querydomain.c',
         'proto.c', 'gethostbyaddr.c', 'gethostbyaddr_r.c', 'gethostbyname.c',
         'gethostbyname2_r.c', 'gethostbyname_r.c', 'gethostbyname2.c',
         'alarm.c', 'syscall.c', 'popen.c', 'pclose.c',
@@ -817,7 +819,7 @@ class libc(MuslInternalLibrary,
 
     if self.is_mt:
       ignore += [
-        'clone.c', '__lock.c',
+        'clone.c',
         'pthread_create.c',
         'pthread_kill.c', 'pthread_sigmask.c',
         '__set_thread_area.c', 'synccall.c',
@@ -827,16 +829,13 @@ class libc(MuslInternalLibrary,
         'syscall_cp.c', 'tls.c',
         # TODO: Support this. See #12216.
         'pthread_setname_np.c',
-        # TODO: These could be moved away from JS in the upcoming musl upgrade.
-        'pthread_join.c', 'pthread_testcancel.c',
       ]
       libc_files += files_in_path(
         path='system/lib/pthread',
         filenames=[
           'library_pthread.c',
+          'proxying.c',
           'pthread_create.c',
-          'pthread_join.c',
-          'pthread_testcancel.c',
           'emscripten_proxy_main.c',
           'emscripten_thread_init.c',
           'emscripten_thread_state.S',
@@ -906,10 +905,11 @@ class libc(MuslInternalLibrary,
           'asctime.c',
           'ctime.c',
           'gmtime.c',
-          'gmtime_r.c',
           'localtime.c',
           'nanosleep.c',
           'clock_nanosleep.c',
+          'ctime_r.c',
+          'utime.c',
         ])
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/legacy',
@@ -917,7 +917,7 @@ class libc(MuslInternalLibrary,
 
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/linux',
-        filenames=['getdents.c', 'gettid.c'])
+        filenames=['getdents.c', 'gettid.c', 'utimes.c'])
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/env',
         filenames=['__environ.c', 'getenv.c', 'putenv.c', 'setenv.c', 'unsetenv.c'])
@@ -961,7 +961,6 @@ class libc(MuslInternalLibrary,
         path='system/lib/libc',
         filenames=[
           'dynlink.c',
-          'extras.c',
           'wasi-helpers.c',
           'emscripten_get_heap_size.c',
           'raise.c',
@@ -970,6 +969,7 @@ class libc(MuslInternalLibrary,
           'sigtimedwait.c',
           'pthread_sigmask.c',
           'emscripten_console.c',
+          'emscripten_time.c',
         ])
 
     libc_files += files_in_path(
@@ -978,9 +978,12 @@ class libc(MuslInternalLibrary,
 
     libc_files += files_in_path(
       path='system/lib/libc',
-      filenames=['emscripten_memcpy.c', 'emscripten_memset.c',
+      filenames=['emscripten_memcpy.c',
+                 'emscripten_memset.c',
                  'emscripten_scan_stack.c',
-                 'emscripten_memmove.c'])
+                 'emscripten_memmove.c',
+                 'emscripten_mmap.c'
+                 ])
 
     libc_files += glob_in_path('system/lib/libc/compat', '*.c')
 
@@ -1079,7 +1082,7 @@ class crtbegin(Library):
     return '.o'
 
   def can_use(self):
-    return super().can_use() and settings.USE_PTHREADS
+    return super().can_use() and settings.SHARED_MEMORY
 
 
 class libcxxabi(NoExceptLibrary, MTLibrary):
@@ -1122,7 +1125,8 @@ class libcxxabi(NoExceptLibrary, MTLibrary):
       'stdlib_exception.cpp',
       'stdlib_stdexcept.cpp',
       'stdlib_typeinfo.cpp',
-      'private_typeinfo.cpp'
+      'private_typeinfo.cpp',
+      'format_exception.cpp',
     ]
     if self.eh_mode == Exceptions.NONE:
       filenames += ['cxa_noexception.cpp']
@@ -1141,8 +1145,16 @@ class libcxxabi(NoExceptLibrary, MTLibrary):
 class libcxx(NoExceptLibrary, MTLibrary):
   name = 'libc++'
 
-  cflags = ['-DLIBCXX_BUILDING_LIBCXXABI=1', '-D_LIBCPP_BUILDING_LIBRARY', '-Oz',
-            '-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS']
+  cflags = [
+    '-Oz',
+    '-DLIBCXX_BUILDING_LIBCXXABI=1',
+    '-D_LIBCPP_BUILDING_LIBRARY',
+    '-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS',
+    # TODO(sbc): clang recently introduced this new warning which is triggered
+    # by `filesystem/directory_iterator.cpp`: https://reviews.llvm.org/D119670
+    '-Wno-unqualified-std-cast-call',
+    '-Wno-unknown-warning-option',
+  ]
 
   src_dir = 'system/lib/libcxx/src'
   src_glob = '**/*.cpp'
@@ -1402,31 +1414,31 @@ class libstb_image(Library):
     return [utils.path_from_root('system/lib/stb_image.c')]
 
 
-class libasmfs(MTLibrary):
-  name = 'libasmfs'
-  never_force = True
-
-  def get_files(self):
-    return [utils.path_from_root('system/lib/fetch/asmfs.cpp')]
-
-  def can_build(self):
-    # ASMFS is looking for a maintainer
-    # https://github.com/emscripten-core/emscripten/issues/9534
-    return True
-
-
 class libwasmfs(MTLibrary, DebugLibrary, AsanInstrumentedLibrary):
   name = 'libwasmfs'
 
   cflags = ['-fno-exceptions', '-std=c++17']
 
+  includes = ['system/lib/wasmfs']
+
   def get_files(self):
-    return files_in_path(
+    backends = files_in_path(
+        path='system/lib/wasmfs/backends',
+        filenames=['fetch_backend.cpp',
+                   'js_file_backend.cpp',
+                   'memory_backend.cpp',
+                   'node_backend.cpp',
+                   'proxied_file_backend.cpp'])
+    return backends + files_in_path(
         path='system/lib/wasmfs',
-        filenames=['syscalls.cpp', 'file_table.cpp', 'file.cpp', 'wasmfs.cpp',
-                   'streams.cpp', 'memory_file.cpp', 'memory_file_backend.cpp',
-                   'js_file_backend.cpp', 'proxied_file_backend.cpp',
-                   'js_api.cpp'])
+        filenames=['file.cpp',
+                   'file_table.cpp',
+                   'js_api.cpp',
+                   'paths.cpp',
+                   'streams.cpp',
+                   'support.cpp',
+                   'syscalls.cpp',
+                   'wasmfs.cpp'])
 
   def can_use(self):
     return settings.WASMFS
@@ -1573,11 +1585,12 @@ class libstandalonewasm(MuslInternalLibrary):
                    '__year_to_secs.c',
                    'clock.c',
                    'clock_gettime.c',
-                   'ctime_r.c',
                    'difftime.c',
                    'gettimeofday.c',
                    'localtime_r.c',
+                   'gmtime_r.c',
                    'mktime.c',
+                   'timegm.c',
                    'time.c'])
     # It is more efficient to use JS for __assert_fail, as it avoids always
     # including fprintf etc.
@@ -1702,7 +1715,7 @@ def get_libs_to_link(args, forced, only_forced):
     libs_to_link.append((lib.get_link_flag(), need_whole_archive))
 
   if '-nostartfiles' not in args:
-    if settings.USE_PTHREADS:
+    if settings.SHARED_MEMORY:
       add_library('crtbegin')
 
     if settings.STANDALONE_WASM:
@@ -1875,6 +1888,15 @@ def install_system_headers(stamp):
   cmake_src = utils.path_from_root('system/lib/cmake')
   cmake_dest = shared.Cache.get_sysroot_dir('lib', 'cmake')
   copytree_exist_ok(cmake_src, cmake_dest)
+
+  # Create a version header based on the emscripten-version.txt
+  version_file = os.path.join(shared.Cache.get_include_dir(), 'emscripten/version.h')
+  utils.write_file(version_file, textwrap.dedent(f'''\
+  /* Automatically generated by tools/system_libs.py */
+  #define __EMSCRIPTEN_major__ {shared.EMSCRIPTEN_VERSION_MAJOR}
+  #define __EMSCRIPTEN_minor__ {shared.EMSCRIPTEN_VERSION_MINOR}
+  #define __EMSCRIPTEN_tiny__ {shared.EMSCRIPTEN_VERSION_TINY}
+  '''))
 
   # Create a stamp file that signal the the header have been installed
   # Removing this file, or running `emcc --clear-cache` or running

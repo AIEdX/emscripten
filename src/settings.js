@@ -257,10 +257,11 @@ var INITIAL_TABLE = -1;
 // [link]
 var ALLOW_TABLE_GROWTH = 0;
 
-// where global data begins; the start of static memory. -1 means use the
-// default, any other value will be used as an override
+// Where global data begins; the start of static memory.
+// A GLOBAL_BASE of 1024 or above is useful for optimizing load/store offsets, as it
+// enables the --low-memory-unused pass
 // [link]
-var GLOBAL_BASE = -1;
+var GLOBAL_BASE = 1024;
 
 // Whether closure compiling is being run on this output
 // [link]
@@ -655,8 +656,10 @@ var ENVIRONMENT = 'web,webview,worker,node';
 var LZ4 = 0;
 
 // Emscripten exception handling options.
-// These options only pertain to Emscripten exception handling and do not
-// control the experimental native wasm exception handling option.
+// The three options below (DISABLE_EXCEPTION_CATCHING,
+// EXCEPTION_CATCHING_ALLOWED, and DISABLE_EXCEPTION_THROWING) only pertain to
+// Emscripten exception handling and do not control the experimental native wasm
+// exception handling option (EXCEPTION_HANDLING).
 
 // Disables generating code to actually catch exceptions. This disabling is on
 // by default as the overhead of exceptions is quite high in size and speed
@@ -682,6 +685,21 @@ var DISABLE_EXCEPTION_CATCHING = 1;
 //
 // [compile+link] - affects user code at compile and system libraries at link
 var EXCEPTION_CATCHING_ALLOWED = [];
+
+// Internal: Tracks whether Emscripten should link in exception throwing (C++
+// 'throw') support library. This does not need to be set directly, but pass
+// -fno-exceptions to the build disable exceptions support. (This is basically
+// -fno-exceptions, but checked at final link time instead of individual .cpp
+// file compile time) If the program *does* contain throwing code (some source
+// files were not compiled with `-fno-exceptions`), and this flag is set at link
+// time, then you will get errors on undefined symbols, as the exception
+// throwing code is not linked in. If so you should either unset the option (if
+// you do want exceptions) or fix the compilation of the source files so that
+// indeed no exceptions are used).
+// TODO(sbc): Move to settings_internal (current blocked due to use in test
+// code).
+// [link]
+var DISABLE_EXCEPTION_THROWING = 0;
 
 // By default we handle exit() in node, by catching the Exit exception. However,
 // this means we catch all process exceptions. If you disable this, then we no
@@ -835,8 +853,8 @@ var EXTRA_EXPORTED_RUNTIME_METHODS = [];
 // optimize.
 //
 // Setting this list to [], or at least a short and concise set of names you
-// actually use, can be very useful for reducing code size. By default the
-// list contains all the possible APIs.
+// actually use, can be very useful for reducing code size. By default, the
+// list contains a set of commonly used symbols.
 //
 // FIXME: should this just be  0  if we want everything?
 // [link]
@@ -1202,7 +1220,7 @@ var EXPORT_NAME = 'Module';
 // When this flag is set, the following features (linker flags) are unavailable:
 //  -s RELOCATABLE=1: the function Runtime.loadDynamicLibrary would need to eval().
 // and some features may fall back to slower code paths when they need to:
-//  --bind: Embind uses eval() to jit functions for speed.
+// Embind: uses eval() to jit functions for speed.
 //
 // Additionally, the following Emscripten runtime functions are unavailable when
 // DYNAMIC_EXECUTION=0 is set, and an attempt to call them will throw an exception:
@@ -1447,7 +1465,11 @@ var SDL2_MIXER_FORMATS = ["ogg"];
 // [other]
 var IN_TEST_HARNESS = 0;
 
-// If true, enables support for pthreads.
+// If 1, target compiling a shared Wasm Memory.
+// [compile+link] - affects user code at compile and system libraries at link.
+var SHARED_MEMORY = 0;
+
+// If true, enables support for pthreads. This implies SHARED_MEMORY.
 // This setting is equivalent to `-pthread`, which should be preferred.
 // [compile+link] - affects user code at compile and system libraries at link.
 var USE_PTHREADS = 0;
@@ -1615,8 +1637,9 @@ var OFFSCREENCANVASES_TO_PTHREAD = "#canvas";
 // [link]
 var OFFSCREEN_FRAMEBUFFER = 0;
 
-// If nonzero, Fetch API (and hence ASMFS) supports backing to IndexedDB. If 0, IndexedDB is not utilized. Set to 0 if
-// IndexedDB support is not interesting for target application, to save a few kBytes.
+// If nonzero, Fetch API supports backing to IndexedDB. If 0, IndexedDB is not
+// utilized. Set to 0 if IndexedDB support is not interesting for target
+// application, to save a few kBytes.
 // [link]
 var FETCH_SUPPORT_INDEXEDDB = 1;
 
@@ -1627,11 +1650,6 @@ var FETCH_DEBUG = 0;
 // If nonzero, enables emscripten_fetch API.
 // [link]
 var FETCH = 0;
-
-// If set to 1, uses the multithreaded filesystem that is implemented within the
-// wasm module, using emscripten_fetch. Implies -s FETCH=1.
-// [link]
-var ASMFS = 0;
 
 // ATTENTION [WIP]: Experimental feature. Please use at your own risk.
 // This will eventually replace the current JS file system implementation.
@@ -1816,21 +1834,6 @@ var MAYBE_WASM2JS = 0;
 // future release.
 // [link]
 var ASAN_SHADOW_SIZE = -1
-
-// Internal: Tracks whether Emscripten should link in exception throwing (C++
-// 'throw') support library. This does not need to be set directly, but pass
-// -fno-exceptions to the build disable exceptions support. (This is basically
-// -fno-exceptions, but checked at final link time instead of individual .cpp
-// file compile time) If the program *does* contain throwing code (some source
-// files were not compiled with `-fno-exceptions`), and this flag is set at link
-// time, then you will get errors on undefined symbols, as the exception
-// throwing code is not linked in. If so you should either unset the option (if
-// you do want exceptions) or fix the compilation of the source files so that
-// indeed no exceptions are used).
-// TODO(sbc): Move to settings_internal (current blocked due to use in test
-// code).
-// [link]
-var DISABLE_EXCEPTION_THROWING = 0;
 
 // Whether we should use the offset converter.  This is needed for older
 // versions of v8 (<7.7) that does not give the hex module offset into wasm

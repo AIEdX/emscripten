@@ -287,7 +287,7 @@ def lld_flags_for_executable(external_symbols):
   if settings.IMPORTED_MEMORY:
     cmd.append('--import-memory')
 
-  if settings.USE_PTHREADS:
+  if settings.SHARED_MEMORY:
     cmd.append('--shared-memory')
 
   if settings.MEMORY64:
@@ -884,8 +884,15 @@ def run_closure_cmd(cmd, filename, env, pretty):
     return os.path.relpath(safe_filename, tempfiles.tmpdir)
 
   for i in range(len(cmd)):
-    if cmd[i] == '--externs' or cmd[i] == '--js':
-      cmd[i + 1] = move_to_safe_7bit_ascii_filename(cmd[i + 1])
+    for prefix in ('--externs', '--js'):
+      # Handle the case where the the flag and the value are two separate arguments.
+      if cmd[i] == prefix:
+        cmd[i + 1] = move_to_safe_7bit_ascii_filename(cmd[i + 1])
+      # and the case where they are one argument, e.g. --externs=foo.js
+      elif cmd[i].startswith(prefix + '='):
+        # Replace the argument with a version that has a safe filename.
+        filename = cmd[i].split('=', 1)[1]
+        cmd[i] = '='.join([prefix, move_to_safe_7bit_ascii_filename(filename)])
 
   outfile = tempfiles.get('.cc.js').name  # Safe 7-bit filename
 
@@ -1362,6 +1369,7 @@ def map_to_js_libs(library_name):
   """
   # Some native libraries are implemented in Emscripten as system side JS libraries
   library_map = {
+    'embind': ['embind/embind.js', 'embind/emval.js'],
     'EGL': ['library_egl.js'],
     'GL': ['library_webgl.js', 'library_html5_webgl.js'],
     'webgl.js': ['library_webgl.js', 'library_html5_webgl.js'],
@@ -1390,6 +1398,7 @@ def map_to_js_libs(library_name):
   }
   # And some are hybrid and require JS and native libraries to be included
   native_library_map = {
+    'embind': 'libembind',
     'GL': 'libGL',
   }
 
