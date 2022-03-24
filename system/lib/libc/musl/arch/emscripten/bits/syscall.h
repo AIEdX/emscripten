@@ -1,6 +1,4 @@
-#define SYS_open		  __syscall_open
 #define SYS_link		  __syscall_link
-#define SYS_unlink		 __syscall_unlink
 #define SYS_chdir		 __syscall_chdir
 #define SYS_mknod		 __syscall_mknod
 #define SYS_chmod		 __syscall_chmod
@@ -8,7 +6,6 @@
 #define SYS_pause		 __syscall_pause
 #define SYS_nice		 __syscall_nice
 #define SYS_sync		 __syscall_sync
-#define SYS_rename		 __syscall_rename
 #define SYS_mkdir		 __syscall_mkdir
 #define SYS_rmdir		 __syscall_rmdir
 #define SYS_dup		 __syscall_dup
@@ -22,7 +19,6 @@
 #define SYS_setrlimit		 __syscall_setrlimit
 #define SYS_getrusage		 __syscall_getrusage
 #define SYS_symlink		 __syscall_symlink
-#define SYS_readlink		 __syscall_readlink
 #define SYS_munmap		 __syscall_munmap
 #define SYS_fchmod		 __syscall_fchmod
 #define SYS_getpriority	 __syscall_getpriority
@@ -53,7 +49,6 @@
 #define SYS_stat64		__syscall_stat64
 #define SYS_lstat64		__syscall_lstat64
 #define SYS_fstat64		__syscall_fstat64
-#define SYS_lchown32		__syscall_lchown32
 #define SYS_getuid32		__syscall_getuid32
 #define SYS_getgid32		__syscall_getgid32
 #define SYS_geteuid32		__syscall_geteuid32
@@ -62,7 +57,6 @@
 #define SYS_fchown32		__syscall_fchown32
 #define SYS_getresuid32	__syscall_getresuid32
 #define SYS_getresgid32	__syscall_getresgid32
-#define SYS_chown32		__syscall_chown32
 #define SYS_mincore		__syscall_mincore
 #define SYS_madvise		__syscall_madvise
 #define SYS_getdents64		__syscall_getdents64
@@ -74,7 +68,7 @@
 #define SYS_mkdirat		__syscall_mkdirat
 #define SYS_mknodat		__syscall_mknodat
 #define SYS_fchownat		__syscall_fchownat
-#define SYS_fstatat64		__syscall_fstatat64
+#define SYS_newfstatat		__syscall_newfstatat
 #define SYS_unlinkat		__syscall_unlinkat
 #define SYS_renameat		__syscall_renameat
 #define SYS_linkat		__syscall_linkat

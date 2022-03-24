@@ -918,11 +918,10 @@ function makeRetainedCompilerSettings() {
   const ret = {};
   for (const x in global) {
     if (!ignore.has(x) && x[0] !== '_' && x == x.toUpperCase()) {
-      try {
-        if (typeof global[x] == 'number' || typeof global[x] == 'string' || this.isArray()) {
-          ret[x] = global[x];
-        }
-      } catch (e) {}
+      const value = global[x];
+      if (typeof value == 'number' || typeof value == 'boolean' || typeof value == 'string' || Array.isArray(x)) {
+        ret[x] = value;
+      }
     }
   }
   return ret;
@@ -932,36 +931,43 @@ function makeRetainedCompilerSettings() {
 const WASM_PAGE_SIZE = 65536;
 
 // Receives a function as text, and a function that constructs a modified
-// function, to which we pass the parsed-out name, arguments, and body of the
-// function. Returns the output of that function.
+// function, to which we pass the parsed-out name, arguments, body, and possible
+// "async" prefix of the input function. Returns the output of that function.
 function modifyFunction(text, func) {
   // Match a function with a name.
-  let match = text.match(/^\s*function\s+([^(]*)?\s*\(([^)]*)\)/);
+  let match = text.match(/^\s*(async\s+)?function\s+([^(]*)?\s*\(([^)]*)\)/);
+  let async_;
   let names;
   let args;
   let rest;
   if (match) {
-    name = match[1];
-    args = match[2];
+    async_ = match[1] || '';
+    name = match[2];
+    args = match[3];
     rest = text.substr(match[0].length);
   } else {
     // Match a function without a name (we could probably use a single regex
     // for both, but it would be more complex).
-    match = text.match(/^\s*function\(([^)]*)\)/);
+    match = text.match(/^\s*(async\s+)?function\(([^)]*)\)/);
     assert(match, 'could not match function ' + text + '.');
     name = '';
-    args = match[1];
+    async_ = match[1] || '';
+    args = match[2];
     rest = text.substr(match[0].length);
   }
   const bodyStart = rest.indexOf('{');
   assert(bodyStart >= 0);
   const bodyEnd = rest.lastIndexOf('}');
   assert(bodyEnd > 0);
-  return func(name, args, rest.substring(bodyStart + 1, bodyEnd));
+  return func(name, args, rest.substring(bodyStart + 1, bodyEnd), async_);
 }
 
 function runOnMainThread(text) {
-  if (USE_PTHREADS) {
+  if (WASM_WORKERS && USE_PTHREADS) {
+    return 'if (!ENVIRONMENT_IS_WASM_WORKER && !ENVIRONMENT_IS_PTHREAD) { ' + text + ' }';
+  } else if (WASM_WORKERS) {
+    return 'if (!ENVIRONMENT_IS_WASM_WORKER) { ' + text + ' }';
+  } else if (USE_PTHREADS) {
     return 'if (!ENVIRONMENT_IS_PTHREAD) { ' + text + ' }';
   } else {
     return text;
@@ -1200,4 +1206,24 @@ function runtimeKeepalivePush() {
 function runtimeKeepalivePop() {
   if (MINIMAL_RUNTIME || (EXIT_RUNTIME == 0 && USE_PTHREADS == 0)) return '';
   return 'runtimeKeepalivePop();';
+}
+
+// Some web functions like TextDecoder.decode() may not work with a view of a
+// SharedArrayBuffer, see https://github.com/whatwg/encoding/issues/172
+// To avoid that, this function allows obtaining an unshared copy of an
+// ArrayBuffer.
+function getUnsharedTextDecoderView(heap, start, end) {
+  const shared = `${heap}.slice(${start}, ${end})`;
+  const unshared = `${heap}.subarray(${start}, ${end})`;
+
+  // No need to worry about this in non-shared memory builds
+  if (!SHARED_MEMORY) return unshared;
+
+  // If asked to get an unshared view to what we know will be a shared view, or if in -Oz,
+  // then unconditionally do a .slice() for smallest code size.
+  if (SHRINK_LEVEL == 2 || heap == 'HEAPU8') return shared;
+
+  // Otherwise, generate a runtime type check: must do a .slice() if looking at a SAB,
+  // or can use .subarray() otherwise.
+  return `${heap}.buffer instanceof SharedArrayBuffer ? ${shared} : ${unshared}`;
 }

@@ -853,10 +853,10 @@ class TestCoreBase(RunnerCore):
     self.emcc('b2.c', ['-c'])
     self.emcc('main.c', ['-c'])
 
-    building.emar('cr', 'liba.a', ['a1.c.o', 'a2.c.o'])
-    building.emar('cr', 'libb.a', ['b1.c.o', 'b2.c.o'])
+    building.emar('cr', 'liba.a', ['a1.o', 'a2.o'])
+    building.emar('cr', 'libb.a', ['b1.o', 'b2.o'])
 
-    building.link_to_object(['main.c.o', 'liba.a', 'libb.a'], 'all.o')
+    building.link_to_object(['main.o', 'liba.a', 'libb.a'], 'all.o')
 
     self.emcc('all.o', self.get_emcc_args(), 'all.js')
     self.do_run('all.js', 'result: 1', no_build=True)
@@ -2114,6 +2114,7 @@ int main(int argc, char **argv) {
 
   @parameterized({
     '': ([], False),
+    'pthreads': (['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD', '-sEXIT_RUNTIME'], False),
     'c': ([], True),
     'linked': (['-sMAIN_MODULE'], False),
     'linked_c': (['-sMAIN_MODULE'], True),
@@ -2121,9 +2122,11 @@ int main(int argc, char **argv) {
   def test_em_js(self, args, force_c):
     if '-sMAIN_MODULE' in args:
       self.check_dylink()
-    self.emcc_args += args
-    if '-sMAIN_MODULE' not in args:
+    else:
       self.emcc_args += ['-sEXPORTED_FUNCTIONS=_main,_malloc']
+    self.emcc_args += args
+    if '-sUSE_PTHREADS' in args:
+      self.setup_node_pthreads()
 
     self.do_core_test('test_em_js.cpp', force_c=force_c)
     self.assertContained("no args returning int", read_file('test_em_js.js'))
@@ -2579,7 +2582,37 @@ The current type of b is: 9
                                  emcc_args=args, interleaved_output=False)
 
   @node_pthreads
+  @no_wasm2js('occasionally hangs in wasm2js (#16569)')
+  def test_pthread_proxying_cpp(self):
+    self.set_setting('EXIT_RUNTIME')
+    self.set_setting('PROXY_TO_PTHREAD')
+    self.set_setting('INITIAL_MEMORY=32mb')
+    args = [f'-I{path_from_root("system/lib/pthread")}']
+    self.do_run_in_out_file_test('pthread/test_pthread_proxying_cpp.cpp',
+                                 emcc_args=args, interleaved_output=False)
+
+  @node_pthreads
+  def test_pthread_proxying_dropped_work(self):
+    self.set_setting('EXIT_RUNTIME')
+    self.set_setting('PTHREAD_POOL_SIZE=2')
+    args = [f'-I{path_from_root("system/lib/pthread")}']
+    self.do_run_in_out_file_test('pthread/test_pthread_proxying_dropped_work.c',
+                                 emcc_args=args)
+
+  @node_pthreads
+  def test_pthread_proxying_refcount(self):
+    self.set_setting('EXIT_RUNTIME')
+    self.set_setting('PTHREAD_POOL_SIZE=1')
+    self.set_setting('ASSERTIONS=0')
+    args = [f'-I{path_from_root("system/lib/pthread")}']
+    if '-fsanitize=address' in self.emcc_args or '-fsanitize=leak' in self.emcc_args:
+      args += ['-DSANITIZER']
+    self.do_run_in_out_file_test('pthread/test_pthread_proxying_refcount.c',
+                                 emcc_args=args)
+
+  @node_pthreads
   def test_pthread_dispatch_after_exit(self):
+    self.set_setting('EXIT_RUNTIME')
     self.do_run_in_out_file_test('pthread/test_pthread_dispatch_after_exit.c', interleaved_output=False)
 
   @node_pthreads
@@ -5494,7 +5527,7 @@ main( int argv, char ** argc ) {
     self.set_setting('EXPORTED_RUNTIME_METHODS', ['UTF8ToString', 'stringToUTF8'])
     self.set_setting('MINIMAL_RUNTIME')
     self.emcc_args += ['--pre-js', test_file('minimal_runtime_exit_handling.js')]
-    for decoder_mode in [False, True]:
+    for decoder_mode in [0, 1]:
       self.set_setting('TEXTDECODER', decoder_mode)
       print(str(decoder_mode))
       self.do_runf(test_file('utf8_invalid.cpp'), 'OK.')
@@ -7786,6 +7819,7 @@ Module['onRuntimeInitialized'] = function() {
     self.set_setting('INVOKE_RUN', 0)
     self.set_setting('EXIT_RUNTIME', exit_runtime)
     self.set_setting('EXPORTED_FUNCTIONS', ['_stringf', '_floatf'])
+    self.set_setting('DEFAULT_LIBRARY_FUNCS_TO_INCLUDE', ['$maybeExit'])
     create_file('main.c', r'''
 #include <stdio.h>
 #include <emscripten.h>
@@ -7947,7 +7981,7 @@ Module['onRuntimeInitialized'] = function() {
 
     # attempts to "break" the wasm by adding an unreachable in $foo_end. returns whether we found it.
     def break_wasm(name):
-      wat = self.run_process([Path(building.get_binaryen_bin(), 'wasm-dis'), name], stdout=PIPE).stdout
+      wat = self.get_wasm_text(name)
       lines = wat.splitlines()
       wat = None
       for i in range(len(lines)):
@@ -8851,7 +8885,6 @@ NODEFS is no longer included by default; build with -lnodefs.js
 
     self.prep_dlfcn_main()
     self.set_setting('EXIT_RUNTIME')
-    self.set_setting('PTHREAD_POOL_SIZE', 2)
     self.set_setting('PROXY_TO_PTHREAD')
     self.do_runf(test_file('core/pthread/test_pthread_dlopen.c'))
 
@@ -8864,7 +8897,6 @@ NODEFS is no longer included by default; build with -lnodefs.js
 
     self.prep_dlfcn_main()
     self.set_setting('EXIT_RUNTIME')
-    self.set_setting('PTHREAD_POOL_SIZE', 2)
     self.set_setting('PROXY_TO_PTHREAD')
     self.do_runf(test_file('core/pthread/test_pthread_dlsym.c'))
 
@@ -9087,7 +9119,7 @@ NODEFS is no longer included by default; build with -lnodefs.js
 
 
 # Generate tests for everything
-def make_run(name, emcc_args, settings=None, env=None, node_args=None):
+def make_run(name, emcc_args, settings=None, env=None, node_args=None, require_v8=False, v8_args=None):
   if env is None:
     env = {}
   if settings is None:
@@ -9106,9 +9138,6 @@ def make_run(name, emcc_args, settings=None, env=None, node_args=None):
       for k, v in self.env.items():
         del os.environ[k]
 
-    if node_args:
-      self.node_args = TT.original
-
   TT.tearDown = tearDown
 
   def setUp(self):
@@ -9125,8 +9154,13 @@ def make_run(name, emcc_args, settings=None, env=None, node_args=None):
     self.emcc_args += emcc_args
 
     if node_args:
-      TT.original = self.node_args
-      self.node_args.append(node_args)
+      self.node_args += node_args
+
+    if v8_args:
+      self.v8_args += v8_args
+
+    if require_v8:
+      self.require_v8()
 
   TT.setUp = setUp
 
@@ -9142,8 +9176,13 @@ core2g = make_run('core2g', emcc_args=['-O2', '-g'])
 core3 = make_run('core3', emcc_args=['-O3'])
 cores = make_run('cores', emcc_args=['-Os'])
 corez = make_run('corez', emcc_args=['-Oz'])
-core64 = make_run('core64', emcc_args=['-O0', '-g3'],
-                  settings={'MEMORY64': 2}, env=None, node_args='--experimental-wasm-bigint')
+
+# MEMORY64=1
+wasm64 = make_run('wasm64', emcc_args=[], settings={'MEMORY64': 1},
+                  require_v8=True, v8_args=['--experimental-wasm-memory64'])
+# MEMORY64=2, or "lowered"
+wasm64l = make_run('wasm64l', emcc_args=[], settings={'MEMORY64': 2},
+                   node_args=['--experimental-wasm-bigint'])
 
 lto0 = make_run('lto0', emcc_args=['-flto', '-O0'])
 lto1 = make_run('lto1', emcc_args=['-flto', '-O1'])
