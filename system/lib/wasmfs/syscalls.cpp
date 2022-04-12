@@ -14,19 +14,20 @@
 #include <poll.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <syscall_arch.h>
 #include <unistd.h>
 #include <utility>
 #include <vector>
 #include <wasi/api.h>
-#include <syscall_arch.h>
 
 #include "backend.h"
 #include "file.h"
 #include "file_table.h"
 #include "paths.h"
 #include "pipe_backend.h"
+#include "streams.h"
 #include "wasmfs.h"
 
 // File permission macros for wasmfs.
@@ -284,6 +285,11 @@ __wasi_errno_t __wasi_fd_sync(__wasi_fd_t fd) {
   return __WASI_ERRNO_SUCCESS;
 }
 
+int __syscall_fdatasync(int fd) {
+  // TODO: Optimize this to avoid unnecessarily flushing unnecessary metadata.
+  return __wasi_fd_sync(fd);
+}
+
 backend_t wasmfs_get_backend_by_fd(int fd) {
   auto openFile = wasmFS.getFileTable().locked().getEntry(fd);
   if (!openFile) {
@@ -303,34 +309,19 @@ backend_t wasmfs_get_backend_by_path(const char* path) {
   return parsed.getFile()->getBackend();
 }
 
+static
+
 int __syscall_fstatat64(int dirfd, intptr_t path, intptr_t buf, int flags) {
   // Only accept valid flags.
   if (flags & ~(AT_EMPTY_PATH | AT_NO_AUTOMOUNT | AT_SYMLINK_NOFOLLOW)) {
     // TODO: Test this case.
     return -EINVAL;
   }
-  std::shared_ptr<File> file;
-  if ((flags & AT_EMPTY_PATH) && strcmp((char*)path, "") == 0) {
-    // Don't parse a path, just use `dirfd` directly.
-    if (dirfd == AT_FDCWD) {
-      // TODO: Test this case.
-      file = wasmFS.getCWD();
-    } else {
-      auto openFile = wasmFS.getFileTable().locked().getEntry(dirfd);
-      if (!openFile) {
-        return -EBADF;
-      }
-      file = openFile->locked().getFile();
-    }
-  } else {
-    // Parse the relative path.
-    // TODO: Handle AT_SYMLINK_NOFOLLOW once we traverse symlinks correctly.
-    auto parsed = path::parseFile((char*)path, dirfd);
-    if (auto err = parsed.getError()) {
-      return err;
-    }
-    file = parsed.getFile();
+  auto parsed = path::getFileAt(dirfd, (char*)path, flags);
+  if (auto err = parsed.getError()) {
+    return err;
   }
+  auto file = parsed.getFile();
 
   // Extract the information from the file.
   auto lockedFile = file->locked();
@@ -1032,6 +1023,27 @@ int __syscall_chmod(intptr_t path, int mode) {
   return __syscall_fchmodat(AT_FDCWD, path, mode, 0);
 }
 
+int __syscall_fchownat(
+  int dirfd, intptr_t path, int owner, int group, int flags) {
+  // Only accept valid flags.
+  if (flags & ~(AT_EMPTY_PATH | AT_SYMLINK_NOFOLLOW)) {
+    // TODO: Test this case.
+    return -EINVAL;
+  }
+  auto parsed = path::getFileAt(dirfd, (char*)path, flags);
+  if (auto err = parsed.getError()) {
+    return err;
+  }
+
+  // Ignore the actual owner and group because we don't track those.
+  // TODO: Update metadata time stamp.
+  return 0;
+}
+
+int __syscall_fchown32(int fd, int owner, int group) {
+  return __syscall_fchownat(fd, (intptr_t) "", owner, group, AT_EMPTY_PATH);
+}
+
 // TODO: Test this with non-AT_FDCWD values.
 int __syscall_faccessat(int dirfd, intptr_t path, int amode, int flags) {
   // The input must be F_OK (check for existence) or a combination of [RWX]_OK
@@ -1110,6 +1122,48 @@ int __syscall_ftruncate64(int fd, uint64_t size) {
     ret = -EINVAL;
   }
   return ret;
+}
+
+static bool isTTY(std::shared_ptr<File>& file) {
+  // TODO: Full TTY support. For now, just see stdin/out/err as terminals and
+  //       nothing else.
+  return file == StdinFile::getSingleton() ||
+         file == StdoutFile::getSingleton() ||
+         file == StderrFile::getSingleton();
+}
+
+int __syscall_ioctl(int fd, int request, ...) {
+  auto openFile = wasmFS.getFileTable().locked().getEntry(fd);
+  if (!openFile) {
+    return -EBADF;
+  }
+  if (!isTTY(openFile->locked().getFile())) {
+    return -ENOTTY;
+  }
+  // TODO: Full TTY support. For now this is limited, and matches the old FS.
+  switch (request) {
+    case TCGETA:
+    case TCGETS:
+    case TCSETA:
+    case TCSETAW:
+    case TCSETAF:
+    case TCSETS:
+    case TCSETSW:
+    case TCSETSF:
+    case TIOCGWINSZ:
+    case TIOCSWINSZ: {
+      // TTY operations that we do nothing for anyhow can just be ignored.
+      return -0;
+    }
+    case TIOCGPGRP:
+    case TIOCSPGRP: {
+      // TODO We should get/set the group number here.
+      return -EINVAL;
+    }
+    default: {
+      abort();
+    }
+  }
 }
 
 int __syscall_pipe(intptr_t fd) {
@@ -1218,6 +1272,80 @@ int __syscall_fallocate(int fd, int mode, uint64_t off, uint64_t len) {
   }
 
   return 0;
+}
+
+// Stubs (at least for now)
+
+int __syscall_accept4(int sockfd,
+                      intptr_t addr,
+                      intptr_t addrlen,
+                      int flags,
+                      int dummy1,
+                      int dummy2) {
+  return -ENOSYS;
+}
+
+int __syscall_bind(
+  int sockfd, intptr_t addr, size_t alen, int dummy, int dymmy2, int dummy3) {
+  return -ENOSYS;
+}
+
+int __syscall_connect(
+  int sockfd, intptr_t addr, size_t len, int dummy, int dummy2, int dummy3) {
+  return -ENOSYS;
+}
+
+int __syscall_socket(
+  int domain, int type, int protocol, int dummy1, int dummy2, int dummy3) {
+  return -ENOSYS;
+}
+
+int __syscall_listen(
+  int sockfd, int backlock, int dummy1, int dummy2, int dummy3, int dummy4) {
+  return -ENOSYS;
+}
+
+int __syscall_getsockopt(int sockfd,
+                         int level,
+                         int optname,
+                         intptr_t optval,
+                         intptr_t optlen,
+                         int dummy) {
+  return -ENOSYS;
+}
+
+int __syscall_getsockname(
+  int sockfd, intptr_t addr, intptr_t len, int dummy, int dummy2, int dummy3) {
+  return -ENOSYS;
+}
+
+int __syscall_getpeername(
+  int sockfd, intptr_t addr, intptr_t len, int dummy, int dummy2, int dummy3) {
+  return -ENOSYS;
+}
+
+int __syscall_sendto(
+  int sockfd, intptr_t msg, size_t len, int flags, intptr_t addr, size_t alen) {
+  return -ENOSYS;
+}
+
+int __syscall_sendmsg(
+  int sockfd, intptr_t msg, int flags, intptr_t addr, size_t alen, int dummy) {
+  return -ENOSYS;
+}
+
+int __syscall_recvfrom(int sockfd,
+                       intptr_t msg,
+                       size_t len,
+                       int flags,
+                       intptr_t addr,
+                       intptr_t alen) {
+  return -ENOSYS;
+}
+
+int __syscall_recvmsg(
+  int sockfd, intptr_t msg, int flags, int dummy, int dummy2, int dummy3) {
+  return -ENOSYS;
 }
 
 } // extern "C"
