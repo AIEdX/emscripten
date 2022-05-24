@@ -216,7 +216,7 @@ function stackCheckInit() {
   // here.
   // TODO(sbc): Move writeStackCookie to native to to avoid this.
 #if RELOCATABLE
-  _emscripten_stack_set_limits({{{ to64(STACK_BASE) }}}, {{{ to64(STACK_MAX) }}});
+  _emscripten_stack_set_limits({{{ STACK_BASE }}} , {{{ STACK_MAX }}});
 #else
   _emscripten_stack_init();
 #endif
@@ -425,7 +425,11 @@ function exit(status, implicit) {
       throw 'unwind';
     } else {
 #if PTHREADS_DEBUG
+#if EXIT_RUNTIME
       err('main thread called exit: keepRuntimeAlive=' + keepRuntimeAlive() + ' (counter=' + runtimeKeepaliveCounter + ')');
+#else
+      err('main thread called exit: keepRuntimeAlive=' + keepRuntimeAlive());
+#endif
 #endif
     }
   }

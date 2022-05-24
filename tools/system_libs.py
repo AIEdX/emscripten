@@ -62,7 +62,8 @@ def clean_env():
   for opt in ['CFLAGS', 'CXXFLAGS', 'LDFLAGS',
               'EMCC_CFLAGS',
               'EMCC_FORCE_STDLIBS',
-              'EMCC_ONLY_FORCED_STDLIBS']:
+              'EMCC_ONLY_FORCED_STDLIBS',
+              'EMMAKEN_JUST_CONFIGURE']:
     if opt in safe_env:
       del safe_env[opt]
   return safe_env
@@ -629,8 +630,6 @@ class SjLjLibrary(Library):
       cflags += ['-sSUPPORT_LONGJMP=wasm',
                  '-sDISABLE_EXCEPTION_THROWING=1',
                  '-D__USING_WASM_SJLJ__']
-    else:
-      cflags += ['-sSUPPORT_LONGJMP=emscripten']
     return cflags
 
   def get_base_name(self):
@@ -649,6 +648,10 @@ class SjLjLibrary(Library):
   def get_default_variation(cls, **kwargs):
     is_wasm = settings.SUPPORT_LONGJMP == 'wasm'
     return super().get_default_variation(is_wasm=is_wasm, **kwargs)
+
+  def can_build(self):
+    # wasm-sjlj is not yet supported with MEMORY64
+    return not (settings.MEMORY64 and self.is_wasm)
 
 
 class MuslInternalLibrary(Library):
@@ -1143,7 +1146,7 @@ class crt1_reactor(MuslInternalLibrary):
     return super().can_use() and settings.STANDALONE_WASM
 
 
-class crtbegin(Library):
+class crtbegin(MuslInternalLibrary):
   name = 'crtbegin'
   cflags = ['-sUSE_PTHREADS']
   src_dir = 'system/lib/pthread'
@@ -1165,7 +1168,7 @@ class libcxxabi(NoExceptLibrary, MTLibrary):
       '-D_LIBCXXABI_BUILDING_LIBRARY',
       '-DLIBCXXABI_NON_DEMANGLING_TERMINATE',
     ]
-  includes = ['system/lib/libcxx']
+  includes = ['system/lib/libcxx/src']
 
   def get_cflags(self):
     cflags = super().get_cflags()
@@ -1227,12 +1230,17 @@ class libcxx(NoExceptLibrary, MTLibrary):
     # by `filesystem/directory_iterator.cpp`: https://reviews.llvm.org/D119670
     '-Wno-unqualified-std-cast-call',
     '-Wno-unknown-warning-option',
+    '-std=c++20',
   ]
+
+  includes = ['system/lib/libcxx/src']
 
   src_dir = 'system/lib/libcxx/src'
   src_glob = '**/*.cpp'
   src_glob_exclude = [
     'xlocale_zos.cpp',
+    'mbsnrtowcs.cpp',
+    'wcsnrtombs.cpp',
     'locale_win32.cpp',
     'thread_win32.cpp',
     'support.cpp',
