@@ -292,7 +292,6 @@ def lld_flags_for_executable(external_symbols):
 
   if settings.LINKABLE:
     cmd.append('--export-dynamic')
-    cmd.append('--no-gc-sections')
 
   c_exports = [e for e in settings.EXPORTED_FUNCTIONS if is_c_symbol(e)]
   # Strip the leading underscores
@@ -372,9 +371,9 @@ def link_lld(args, target, external_symbols=None):
   for a in llvm_backend_args():
     cmd += ['-mllvm', a]
 
-  if settings.EXCEPTION_HANDLING:
+  if settings.WASM_EXCEPTIONS:
     cmd += ['-mllvm', '-wasm-enable-eh']
-  if settings.EXCEPTION_HANDLING or settings.SUPPORT_LONGJMP == 'wasm':
+  if settings.WASM_EXCEPTIONS or settings.SUPPORT_LONGJMP == 'wasm':
     cmd += ['-mllvm', '-exception-model=wasm']
 
   if settings.MEMORY64:

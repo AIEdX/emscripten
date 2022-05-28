@@ -607,7 +607,7 @@ class NoExceptLibrary(Library):
 
   @classmethod
   def get_default_variation(cls, **kwargs):
-    if settings.EXCEPTION_HANDLING:
+    if settings.WASM_EXCEPTIONS:
       eh_mode = Exceptions.WASM
     elif settings.DISABLE_EXCEPTION_CATCHING == 1:
       eh_mode = Exceptions.NONE
@@ -861,6 +861,7 @@ class libc(MuslInternalLibrary,
           'library_pthread.c',
           'proxying.c',
           'pthread_create.c',
+          'pthread_kill.c',
           'emscripten_proxy_main.c',
           'emscripten_thread_init.c',
           'emscripten_thread_state.S',
@@ -940,6 +941,7 @@ class libc(MuslInternalLibrary,
           'ctime_r.c',
           'timespec_get.c',
           'utime.c',
+          '__map_file.c',
         ])
     libc_files += files_in_path(
         path='system/lib/libc/musl/src/legacy',
@@ -1202,7 +1204,7 @@ class libcxxabi(NoExceptLibrary, MTLibrary):
       'stdlib_stdexcept.cpp',
       'stdlib_typeinfo.cpp',
       'private_typeinfo.cpp',
-      'format_exception.cpp',
+      'cxa_exception_emscripten.cpp',
     ]
     if self.eh_mode == Exceptions.NONE:
       filenames += ['cxa_noexception.cpp']
@@ -1851,7 +1853,7 @@ def get_libs_to_link(args, forced, only_forced):
     add_library('libc++')
   if settings.LINK_AS_CXX or sanitize:
     add_library('libc++abi')
-    if settings.EXCEPTION_HANDLING:
+    if settings.WASM_EXCEPTIONS:
       add_library('libunwind')
 
   if settings.USE_ASAN:

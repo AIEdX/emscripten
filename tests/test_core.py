@@ -233,6 +233,32 @@ def also_with_standalone_wasm(wasm2c=False, impure=False):
   return decorated
 
 
+def with_asyncify_and_stack_switching(f):
+  assert callable(f)
+
+  def metafunc(self, stack_switching):
+    if stack_switching:
+      self.set_setting('ASYNCIFY', 2)
+      self.require_v8()
+      # enable stack switching and other relevant features (like reference types
+      # for the return value of externref)
+      self.v8_args.append('--wasm-staging')
+      self.v8_args.append('--experimental-wasm-stack-switching')
+      if not self.is_wasm():
+        self.skipTest('wasm2js does not support WebAssembly.Suspender yet')
+      # emcc warns about stack switching being experimental, and we build with
+      # warnings-as-errors, so disable that warning
+      self.emcc_args += ['-Wno-experimental']
+      f(self)
+    else:
+      self.set_setting('ASYNCIFY')
+      f(self)
+
+  metafunc._parameterize = {'': (False,),
+                            'stack_switching': (True,)}
+  return metafunc
+
+
 def no_optimize(note=''):
   assert not callable(note)
 
@@ -1608,10 +1634,10 @@ int main(int argc, char **argv)
     self.do_runf('main.cpp', None, assert_returncode=NON_ZERO)
 
   @no_wasm64('MEMORY64 does not yet support exceptions')
-  def test_format_exception(self):
+  def test_exception_message(self):
     self.set_setting('DISABLE_EXCEPTION_CATCHING', 0)
-    self.set_setting('DEFAULT_LIBRARY_FUNCS_TO_INCLUDE', ['$formatException', '__cxa_decrement_exception_refcount', '__cxa_increment_exception_refcount'])
-    self.set_setting('EXPORTED_FUNCTIONS', ['_main', 'formatException', '_emscripten_format_exception', '_free'])
+    self.set_setting('DEFAULT_LIBRARY_FUNCS_TO_INCLUDE', ['$getExceptionMessage', '__cxa_decrement_exception_refcount', '__cxa_increment_exception_refcount'])
+    self.set_setting('EXPORTED_FUNCTIONS', ['_main', 'getExceptionMessage', '___get_exception_message', '_free'])
     self.maybe_closure()
     src = '''
       #include <emscripten.h>
@@ -1645,14 +1671,14 @@ int main(int argc, char **argv)
           EM_ASM({
             for (let i = 1; i < 6; i++){
               try {
-                  Module["_throw_exc"](i);
+                  _throw_exc(i);
               } catch(p) {
                   // Because we are catching and handling the exception in JS, the normal
                   // exception catching C++ code doesn't kick in, so we need to make sure we free
                   // the exception, if necessary. By incrementing and decrementing the refcount
                   // we trigger the free'ing of the exception if its refcount was zero.
                   ___cxa_increment_exception_refcount(p);
-                  console.log(Module["formatException"](p).replace(/0x[0-9a-f]*/, "xxx"));
+                  console.log(getExceptionMessage(p));
                   ___cxa_decrement_exception_refcount(p);
               }
             }
@@ -1660,11 +1686,11 @@ int main(int argc, char **argv)
       }
     '''
     expected = '''\
-terminating with uncaught exception of type int
-terminating with uncaught exception of type char
-terminating with uncaught exception of type std::runtime_error: abc
-terminating with uncaught exception of type myexception: My exception happened
-terminating with uncaught exception of type char const*
+exception of type int
+exception of type char
+exception of type std::runtime_error: abc
+exception of type myexception: My exception happened
+exception of type char const*
 '''
 
     self.do_run(src, expected)
@@ -1811,7 +1837,7 @@ int main() {
 
         EM_JS(Classey*, get_null, (), {
         #if __wasm64__
-          return BigInt(0);
+          return 0n;
         #else
           return 0;
         #endif
@@ -2802,6 +2828,13 @@ The current type of b is: 9
     self.set_setting('ASSERTIONS', 2)
     self.set_setting('MALLOC', 'emmalloc')
     self.do_core_test('test_emmalloc.c')
+
+  @node_pthreads
+  def test_pthread_stdout_after_main(self):
+    # Verify that secondary threads can continue to write to stdout even
+    # after the main thread returns.  We had a regression where stdio
+    # streams were locked when the main thread returned.
+    self.do_runf(test_file('pthread/test_pthread_stdout_after_main.c'))
 
   def test_tcgetattr(self):
     self.do_runf(test_file('termios/test_tcgetattr.c'), 'success')
@@ -5371,18 +5404,19 @@ Pass: 0.000012 0.000012''')
     self.do_core_test('test_langinfo.c')
 
   def test_files(self):
-    self.banned_js_engines = [config.SPIDERMONKEY_ENGINE] # closure can generate variables called 'gc', which pick up js shell stuff
-    if self.maybe_closure(): # Use closure here, to test we don't break FS stuff
-      self.emcc_args = [x for x in self.emcc_args if x != '-g'] # ensure we test --closure 1 --memory-init-file 1 (-g would disable closure)
-    elif '-O3' in self.emcc_args and not self.is_wasm():
+    # Use closure here, to test we don't break FS stuff
+    if '-O3' in self.emcc_args and not self.is_wasm():
       print('closure 2')
       self.emcc_args += ['--closure', '2'] # Use closure 2 here for some additional coverage
-      return self.skipTest('TODO: currently skipped because CI runs out of memory running Closure in this test!')
+      # Sadly --closure=2 is not yet free of closure warnings
+      # FIXME(https://github.com/emscripten-core/emscripten/issues/17080)
+      self.ldflags.remove('-sCLOSURE_WARNINGS=error')
+    elif self.maybe_closure():
+      # closure can generate variables called 'gc', which pick up js shell stuff
+      self.banned_js_engines = [config.SPIDERMONKEY_ENGINE]
 
     self.emcc_args += ['--pre-js', 'pre.js']
     self.set_setting('FORCE_FILESYSTEM')
-
-    print('base', self.emcc_args)
 
     create_file('pre.js', '''
 /** @suppress{checkTypes}*/
@@ -5403,9 +5437,6 @@ Module = {
 
     create_file('test.file', 'some data')
 
-    mem_file = 'files.js.mem'
-    try_delete(mem_file)
-
     def clean(out):
       return '\n'.join([line for line in out.split('\n') if 'binaryen' not in line and 'wasm' not in line and 'so not running' not in line])
 
@@ -5413,7 +5444,7 @@ Module = {
                  output_nicerizer=clean)
 
     if self.uses_memory_init_file():
-      self.assertExists(mem_file)
+      self.assertExists('files.js.mem')
 
   def test_files_m(self):
     # Test for Module.stdin etc.
@@ -7926,10 +7957,10 @@ void* operator new(size_t size) {
     self.do_run_in_out_file_test('vswprintf_utf8.c')
 
   @no_memory64('TODO: asyncify for wasm64')
+  @with_asyncify_and_stack_switching
   def test_async_hello(self):
     # needs to flush stdio streams
     self.set_setting('EXIT_RUNTIME')
-    self.set_setting('ASYNCIFY')
 
     create_file('main.c',  r'''
 #include <stdio.h>
@@ -7987,6 +8018,7 @@ Module['onRuntimeInitialized'] = function() {
     self.do_runf('main.c', 'The call to main is running asynchronously.')
 
   @no_memory64('TODO: asyncify for wasm64')
+  @with_asyncify_and_stack_switching
   def test_async_ccall_good(self):
     # check reasonable ccall use
     # needs to flush stdio streams

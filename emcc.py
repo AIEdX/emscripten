@@ -551,7 +551,7 @@ def get_binaryen_passes():
     # generate the  byn$fpcast_emu  functions after asyncify runs, and so we wouldn't
     # be able to further process them.
     passes += ['--fpcast-emu']
-  if settings.ASYNCIFY:
+  if settings.ASYNCIFY == 1:
     passes += ['--asyncify']
     if settings.ASSERTIONS:
       passes += ['--pass-arg=asyncify-asserts']
@@ -844,7 +844,7 @@ def get_cflags(user_args):
 
   # if exception catching is disabled, we can prevent that code from being
   # generated in the frontend
-  if settings.DISABLE_EXCEPTION_CATCHING and not settings.EXCEPTION_HANDLING:
+  if settings.DISABLE_EXCEPTION_CATCHING and not settings.WASM_EXCEPTIONS:
     cflags.append('-fignore-exceptions')
 
   if settings.INLINING_LIMIT:
@@ -1637,8 +1637,8 @@ def phase_linker_setup(options, state, newargs, user_settings):
     diagnostics.warning('deprecated', 'EXTRA_EXPORTED_RUNTIME_METHODS is deprecated, please use EXPORTED_RUNTIME_METHODS instead')
     settings.EXPORTED_RUNTIME_METHODS += settings.EXTRA_EXPORTED_RUNTIME_METHODS
 
-  # If no output format was sepecific we try to imply the format based on
-  # the output filename extension.
+  # If no output format was specified we try to deduce the format based on
+  # the output filename extension
   if not options.oformat and (options.relocatable or (options.shared and not settings.SIDE_MODULE)):
     # Until we have a better story for actually producing runtime shared libraries
     # we support a compatibility mode where shared libraries are actually just
@@ -1825,7 +1825,9 @@ def phase_linker_setup(options, state, newargs, user_settings):
   if not settings.BOOTSTRAPPING_STRUCT_INFO:
     # Include the internal library function since they are used by runtime functions.
     settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['$getWasmTableEntry', '$setWasmTableEntry']
-    if settings.SAFE_HEAP or not settings.MINIMAL_RUNTIME:
+    if settings.SAFE_HEAP:
+      settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['$getValue_safe', '$setValue_safe']
+    if not settings.MINIMAL_RUNTIME:
       settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE += ['$getValue', '$setValue']
 
   if settings.MAIN_MODULE:
@@ -2100,12 +2102,11 @@ def phase_linker_setup(options, state, newargs, user_settings):
       ]
 
     if not settings.STANDALONE_WASM and (settings.EXIT_RUNTIME or settings.ASSERTIONS):
-      # We use __stdio_exit to shut down musl's stdio subsystems and flush
-      # streams on exit.
-      # We only include it if the runtime is exitable, or when ASSERTIONS
+      # to flush streams on FS exit, we need to be able to call fflush
+      # we only include it if the runtime is exitable, or when ASSERTIONS
       # (ASSERTIONS will check that streams do not need to be flushed,
       # helping people see when they should have enabled EXIT_RUNTIME)
-      settings.EXPORT_IF_DEFINED += ['__stdio_exit']
+      settings.EXPORT_IF_DEFINED += ['fflush']
 
     if settings.SUPPORT_ERRNO:
       # so setErrNo JS library function can report errno back to C
@@ -2137,7 +2138,7 @@ def phase_linker_setup(options, state, newargs, user_settings):
   # TODO: Move this into the library JS file once it becomes possible.
   # See https://github.com/emscripten-core/emscripten/pull/15982
   if settings.INCLUDE_FULL_LIBRARY and not settings.DISABLE_EXCEPTION_CATCHING:
-    settings.EXPORTED_FUNCTIONS += ['_emscripten_format_exception', '_free']
+    settings.EXPORTED_FUNCTIONS += ['___get_exception_message', '_free']
 
   if settings.WASM_WORKERS:
     # TODO: After #15982 is resolved, these dependencies can be declared in library_wasm_worker.js
@@ -2212,10 +2213,13 @@ def phase_linker_setup(options, state, newargs, user_settings):
   # are emitting an optimized JS+wasm combo (then the JS knows how to load the minified names).
   # Things that process the JS after this operation would be done must disable this.
   # For example, ASYNCIFY_LAZY_LOAD_CODE needs to identify import names.
+  # ASYNCIFY=2 does not support this optimization yet as it has a hardcoded
+  # check for 'main' as an export name. TODO
   if will_metadce() and \
       settings.OPT_LEVEL >= 2 and \
       settings.DEBUG_LEVEL <= 2 and \
       options.oformat not in (OFormat.WASM, OFormat.BARE) and \
+      settings.ASYNCIFY != 2 and \
       not settings.LINKABLE and \
       not settings.STANDALONE_WASM and \
       not settings.AUTODEBUG and \
@@ -2511,6 +2515,15 @@ def phase_linker_setup(options, state, newargs, user_settings):
 
     settings.ASYNCIFY_IMPORTS = [get_full_import_name(i) for i in settings.ASYNCIFY_IMPORTS]
 
+    if settings.ASYNCIFY == 2:
+      diagnostics.warning('experimental', 'ASYNCIFY with stack switching is experimental')
+      if not settings.EXIT_RUNTIME:
+        # FIXME: investigate d8 issues without EXIT_RUNTIME (quit exits too
+        #        early, not leaving async work a chance to run; only
+        #        EXIT_RUNTIME tracks whether such work exists and should stop us
+        #        from exiting).
+        exit_with_error('ASYNCIFY with stack switching requires EXIT_RUNTIME for now')
+
   if settings.WASM2JS:
     if settings.GENERATE_SOURCE_MAP:
       exit_with_error('wasm2js does not support source maps yet (debug in wasm for now)')
@@ -2569,12 +2582,12 @@ def phase_linker_setup(options, state, newargs, user_settings):
   # Export tag objects which are likely needed by the native code, but which are
   # currently not reported in the metadata of wasm-emscripten-finalize
   if settings.RELOCATABLE:
-    if settings.EXCEPTION_HANDLING:
+    if settings.WASM_EXCEPTIONS:
       settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE.append('__cpp_exception')
     if settings.SUPPORT_LONGJMP == 'wasm':
       settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE.append('__c_longjmp')
 
-  if settings.EXCEPTION_HANDLING:
+  if settings.WASM_EXCEPTIONS:
     settings.REQUIRED_EXPORTS += ['__trap']
 
   return target, wasm_target
@@ -2738,9 +2751,9 @@ def phase_compile_inputs(options, state, newargs, input_files):
 @ToolchainProfiler.profile_block('calculate system libraries')
 def phase_calculate_system_libraries(state, linker_arguments, linker_inputs, newargs):
   extra_files_to_link = []
-  # link in ports and system libraries, if necessary
+  # Link in ports and system libraries, if necessary
   if not settings.SIDE_MODULE:
-    # Ports are always linked into the main module, never the size module.
+    # Ports are always linked into the main module, never the side module.
     extra_files_to_link += ports.get_libs(settings)
   all_linker_inputs = [f for _, f in sorted(linker_inputs)] + extra_files_to_link
   extra_files_to_link += system_libs.calculate(all_linker_inputs, newargs, forced=state.forced_stdlibs)
@@ -3219,7 +3232,7 @@ def parse_args(newargs):
     elif arg == '-fno-exceptions':
       settings.DISABLE_EXCEPTION_CATCHING = 1
       settings.DISABLE_EXCEPTION_THROWING = 1
-      settings.EXCEPTION_HANDLING = 0
+      settings.WASM_EXCEPTIONS = 0
     elif arg == '-fexceptions':
       eh_enabled = True
     elif arg == '-fwasm-exceptions':
@@ -3282,11 +3295,11 @@ def parse_args(newargs):
   # exception handling by default when -fexceptions is given when wasm
   # exception handling becomes stable.
   if wasm_eh_enabled:
-    settings.EXCEPTION_HANDLING = 1
+    settings.WASM_EXCEPTIONS = 1
     settings.DISABLE_EXCEPTION_THROWING = 1
     settings.DISABLE_EXCEPTION_CATCHING = 1
   elif eh_enabled:
-    settings.EXCEPTION_HANDLING = 0
+    settings.WASM_EXCEPTIONS = 0
     settings.DISABLE_EXCEPTION_THROWING = 0
     settings.DISABLE_EXCEPTION_CATCHING = 0
 
@@ -3314,7 +3327,7 @@ def phase_binaryen(target, options, wasm_target):
     intermediate_debug_info += 1
   if options.emit_symbol_map:
     intermediate_debug_info += 1
-  if settings.ASYNCIFY:
+  if settings.ASYNCIFY == 1:
     intermediate_debug_info += 1
   # note that wasm-ld can strip DWARF info for us too (--strip-debug), but it
   # also strips the Names section. so to emit just the Names section we don't
@@ -3334,7 +3347,7 @@ def phase_binaryen(target, options, wasm_target):
       passes += ['--strip-producers']
     # if asyncify is used, we will use it in the next stage, and so if it is
     # the only reason we need intermediate debug info, we can stop keeping it
-    if settings.ASYNCIFY:
+    if settings.ASYNCIFY == 1:
       intermediate_debug_info -= 1
     # currently binaryen's DWARF support will limit some optimizations; warn on
     # that. see https://github.com/emscripten-core/emscripten/issues/15269
