@@ -1,6 +1,7 @@
 #include <cassert>
 #include <condition_variable>
 #include <emscripten/proxying.h>
+#include <emscripten/eventloop.h>
 #include <iostream>
 #include <sched.h>
 
@@ -26,7 +27,11 @@ void looper_main() {
 }
 
 void returner_main() {
-  emscripten_exit_with_live_runtime();
+  // Return back to the event loop while keeping the runtime alive.
+  // Note that we can't use `emscripten_exit_with_live_runtime` here without
+  // introducing a memory leak due to way to C++11 threads interact with
+  // unwinding. See https://github.com/emscripten-core/emscripten/issues/17091.
+  emscripten_runtime_keepalive_push();
 }
 
 void test_proxy_async() {

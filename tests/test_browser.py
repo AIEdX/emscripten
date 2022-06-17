@@ -22,7 +22,7 @@ from urllib.request import urlopen
 
 from common import BrowserCore, RunnerCore, path_from_root, has_browser, EMTEST_BROWSER, Reporting
 from common import create_file, parameterized, ensure_dir, disabled, test_file, WEBIDL_BINDER
-from common import read_file, requires_v8, also_with_minimal_runtime
+from common import read_file, requires_v8, also_with_minimal_runtime, EMRUN
 from tools import shared
 from tools import ports
 from tools.shared import EMCC, WINDOWS, FILE_PACKAGER, PIPE
@@ -1873,19 +1873,22 @@ keydown(100);keyup(100); // trigger the end
     for args in [[], ['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD', '-sEXIT_RUNTIME']]:
       self.btest_exit('emscripten_main_loop.cpp', args=args)
 
+  @parameterized({
+    '': ([],),
+    # test pthreads + AUTO_JS_LIBRARIES mode as well
+    'pthreads': (['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD', '-sAUTO_JS_LIBRARIES=0'],),
+  })
   @requires_threads
-  def test_emscripten_main_loop_settimeout(self):
-    for args in [
-      [],
-      # test pthreads + AUTO_JS_LIBRARIES mode as well
-      ['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD', '-sAUTO_JS_LIBRARIES=0'],
-    ]:
-      self.btest_exit('emscripten_main_loop_settimeout.cpp', args=args)
+  def test_emscripten_main_loop_settimeout(self, args):
+    self.btest_exit('emscripten_main_loop_settimeout.cpp', args=args)
 
+  @parameterized({
+    '': ([],),
+    'pthreads': (['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD'],),
+  })
   @requires_threads
-  def test_emscripten_main_loop_and_blocker(self):
-    for args in [[], ['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD']]:
-      self.btest_exit('emscripten_main_loop_and_blocker.cpp', args=args)
+  def test_emscripten_main_loop_and_blocker(self, args):
+    self.btest_exit('emscripten_main_loop_and_blocker.cpp', args=args)
 
   @requires_threads
   def test_emscripten_main_loop_and_blocker_exit(self):
@@ -1893,10 +1896,14 @@ keydown(100);keyup(100); // trigger the end
     # app should still stay alive until the loop ends
     self.btest_exit('emscripten_main_loop_and_blocker.cpp')
 
+  @parameterized({
+    '': ([],),
+    'worker': (['--proxy-to-worker'],),
+    'pthreads': (['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD'],)
+  })
   @requires_threads
-  def test_emscripten_main_loop_setimmediate(self):
-    for args in [[], ['--proxy-to-worker'], ['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD']]:
-      self.btest_exit('emscripten_main_loop_setimmediate.cpp', args=args)
+  def test_emscripten_main_loop_setimmediate(self, args):
+    self.btest_exit('emscripten_main_loop_setimmediate.cpp', args=args)
 
   def test_fs_after_main(self):
     for args in [[], ['-O1']]:
@@ -1934,11 +1941,14 @@ keydown(100);keyup(100); // trigger the end
   def test_gl_glteximage(self):
     self.btest('gl_teximage.c', '1', args=['-lGL', '-lSDL'])
 
+  @parameterized({
+    '': ([],),
+    'pthreads': (['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD', '-sOFFSCREEN_FRAMEBUFFER'],),
+  })
   @requires_graphics_hardware
   @requires_threads
-  def test_gl_textures(self):
-    for args in [[], ['-sUSE_PTHREADS', '-sPROXY_TO_PTHREAD', '-sOFFSCREEN_FRAMEBUFFER']]:
-      self.btest('gl_textures.cpp', '0', args=['-lGL'] + args)
+  def test_gl_textures(self, args):
+    self.btest('gl_textures.cpp', '0', args=['-lGL'] + args)
 
   @requires_graphics_hardware
   def test_gl_ps(self):
@@ -5392,9 +5402,6 @@ window.close = function() {
 
   def test_full_js_library_strict(self):
     self.btest_exit(test_file('hello_world.c'), args=['-sINCLUDE_FULL_LIBRARY', '-sSTRICT_JS'])
-
-
-EMRUN = path_from_root('emrun')
 
 
 class emrun(RunnerCore):

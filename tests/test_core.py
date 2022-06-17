@@ -20,7 +20,7 @@ if __name__ == '__main__':
   raise Exception('do not run this file directly; do something like: tests/runner')
 
 from tools.shared import try_delete, PIPE
-from tools.shared import PYTHON, EMCC, EMAR
+from tools.shared import EMCC, EMAR
 from tools.utils import WINDOWS, MACOS, write_file
 from tools import shared, building, config, webassembly
 import common
@@ -28,7 +28,7 @@ from common import RunnerCore, path_from_root, requires_native_clang, test_file,
 from common import skip_if, needs_dylink, no_windows, no_mac, is_slow_test, parameterized
 from common import env_modify, with_env_modify, disabled, node_pthreads, also_with_wasm_bigint
 from common import read_file, read_binary, requires_v8, requires_node
-from common import NON_ZERO, WEBIDL_BINDER, EMBUILDER
+from common import NON_ZERO, WEBIDL_BINDER, EMBUILDER, PYTHON
 import clang_native
 
 # decorators for limiting which modes a test can run in
@@ -1635,13 +1635,8 @@ int main(int argc, char **argv)
 
   @no_wasm64('MEMORY64 does not yet support exceptions')
   @with_both_eh_sjlj
-  def test_exception_message(self):
-    self.set_setting('DEFAULT_LIBRARY_FUNCS_TO_INCLUDE', ['$getExceptionMessage', '$incrementExceptionRefcount', '$decrementExceptionRefcount'])
-    self.set_setting('EXPORTED_FUNCTIONS', ['_main', 'getExceptionMessage', '___get_exception_message'])
-    if '-fwasm-exceptions' in self.emcc_args:
-      exports = self.get_setting('EXPORTED_FUNCTIONS')
-      self.set_setting('EXPORTED_FUNCTIONS', exports + ['___cpp_exception', '___increment_wasm_exception_refcount', '___decrement_wasm_exception_refcount'])
-
+  def test_EXPORT_EXCEPTION_HANDLING_HELPERS(self):
+    self.set_setting('EXPORT_EXCEPTION_HANDLING_HELPERS')
     # FIXME Temporary workaround. See 'FIXME' in the test source code below for
     # details.
     if self.get_setting('DISABLE_EXCEPTION_CATCHING') == 0:
@@ -2104,7 +2099,6 @@ int main() {
     self.do_run(src, 'got null')
 
   def test_emscripten_get_now(self):
-    self.banned_js_engines = [config.V8_ENGINE] # timer limitations in v8 shell
     # needs to flush stdio streams
     self.set_setting('EXIT_RUNTIME')
     self.maybe_closure()
@@ -2749,8 +2743,6 @@ The current type of b is: 9
                                  interleaved_output=False, emcc_args=args)
 
   @node_pthreads
-  @no_lsan('https://github.com/emscripten-core/emscripten/issues/17091')
-  @no_asan('https://github.com/emscripten-core/emscripten/issues/17091')
   @no_wasm2js('occasionally hangs in wasm2js (#16569)')
   def test_pthread_proxying_cpp(self):
     self.set_setting('EXIT_RUNTIME')
@@ -2906,8 +2898,6 @@ The current type of b is: 9
     self.do_core_test('test_copyop.cpp')
 
   def test_memcpy_memcmp(self):
-    self.banned_js_engines = [config.V8_ENGINE] # Currently broken under V8_ENGINE but not node
-
     def check(output):
       output = output.replace('\n \n', '\n') # remove extra node output
       return hashlib.sha1(output.encode('utf-8')).hexdigest()
@@ -3276,10 +3266,6 @@ The current type of b is: 9
 
   @needs_dylink
   def test_dlfcn_data_and_fptr(self):
-    # Failing under v8 since: https://chromium-review.googlesource.com/712595
-    if self.is_wasm():
-      self.banned_js_engines = [config.V8_ENGINE]
-
     create_file('liblib.c', r'''
       #include <stdio.h>
 
@@ -5506,13 +5492,9 @@ Module = {
     self.do_runf(test_file('fs/test_getdents64.cpp'), '..')
 
   def test_getdents64_special_cases(self):
-    # https://bugs.chromium.org/p/v8/issues/detail?id=6881
-    self.banned_js_engines = [config.V8_ENGINE]
     self.do_run_in_out_file_test('fs/test_getdents64_special_cases.cpp')
 
   def test_getcwd_with_non_ascii_name(self):
-    # https://bugs.chromium.org/p/v8/issues/detail?id=6881
-    self.banned_js_engines = [config.V8_ENGINE]
     self.do_run_in_out_file_test('fs/test_getcwd_with_non_ascii_name.cpp')
 
   def test_proc_self_fd(self):
@@ -6104,11 +6086,8 @@ Module['onRuntimeInitialized'] = function() {
       self.emcc_args += ['-lnodefs.js']
     self.do_run_in_out_file_test('unistd/misc.c', interleaved_output=False)
 
-  # i64s in the API, which we'd need to legalize for JS, so in standalone mode
-  # all we can test is wasm VMs
   @also_with_standalone_wasm(wasm2c=True)
   def test_posixtime(self):
-    self.banned_js_engines = [config.V8_ENGINE] # v8 lacks monotonic time
     self.do_core_test('test_posixtime.c')
 
   def test_uname(self):
@@ -6792,9 +6771,11 @@ void* operator new(size_t size) {
                  libraries=self.get_bullet_library(use_cmake),
                  includes=[test_file('third_party/bullet/src')])
 
-  @unittest.skip('LLVM changes have caused this C++ to no longer compile, https://github.com/emscripten-core/emscripten/issues/14614')
   @no_asan('issues with freetype itself')
+  @no_ubsan('local count too large')
+  @no_lsan('output differs')
   @needs_make('depends on freetype')
+  @no_wasm64('MEMORY64 does not yet support SJLJ')
   @is_slow_test
   def test_poppler(self):
     pdf_data = read_binary(test_file('poppler/paper.pdf'))
@@ -7498,6 +7479,11 @@ void* operator new(size_t size) {
     err = self.expect_fail([EMCC, test_file('embind/test_val_assignment.cpp'), '-lembind', '-c'])
     self.assertContained('candidate function not viable: expects an lvalue for object argument', err)
 
+  @no_wasm64('embind does not yet support MEMORY64')
+  def test_embind_dynamic_initialization(self):
+    self.emcc_args += ['-lembind']
+    self.do_run_in_out_file_test('embind/test_dynamic_initialization.cpp')
+
   @no_wasm2js('wasm_bigint')
   @no_wasm64('embind does not yet support MEMORY64')
   def test_embind_i64_val(self):
@@ -7870,7 +7856,6 @@ void* operator new(size_t size) {
   @no_wasm2js('symbol names look different wasm2js backtraces')
   @also_with_wasm_bigint
   def test_emscripten_log(self):
-    self.banned_js_engines = [config.V8_ENGINE] # v8 doesn't support console.log
     self.set_setting('DEMANGLE_SUPPORT')
     if '-g' not in self.emcc_args:
       self.emcc_args.append('-g')
@@ -9197,6 +9182,15 @@ NODEFS is no longer included by default; build with -lnodefs.js
 
   @needs_dylink
   @node_pthreads
+  def test_pthread_dylink_main_module_1(self):
+    self.emcc_args.append('-Wno-experimental')
+    self.set_setting('EXIT_RUNTIME')
+    self.set_setting('USE_PTHREADS')
+    self.set_setting('MAIN_MODULE')
+    self.do_runf(test_file('hello_world.c'))
+
+  @needs_dylink
+  @node_pthreads
   def test_Module_dynamicLibraries_pthreads(self):
     # test that Module.dynamicLibraries works with pthreads
     self.emcc_args += ['-pthread', '-Wno-experimental']
@@ -9259,7 +9253,7 @@ NODEFS is no longer included by default; build with -lnodefs.js
       # In standalone we don't support implicitly building without main.  The user has to explicitly
       # opt out (see below).
       err = self.expect_fail([EMCC, test_file('core/test_ctors_no_main.cpp')] + self.get_emcc_args())
-      self.assertContained('error: undefined symbol: main (referenced by top-level compiled C/C++ code)', err)
+      self.assertContained('error: undefined symbol: main/__main_argc_argv (referenced by top-level compiled C/C++ code)', err)
       self.assertContained('warning: To build in STANDALONE_WASM mode without a main(), use emcc --no-entry', err)
     elif not self.get_setting('LLD_REPORT_UNDEFINED') and not self.get_setting('STRICT'):
       # Traditionally in emscripten we allow main to be implicitly undefined.  This allows programs

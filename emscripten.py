@@ -112,7 +112,15 @@ def to_nice_ident(ident): # limited version of the JS function toNiceIdent
   return ident.replace('%', '$').replace('@', '_').replace('.', '_')
 
 
-def update_settings_glue(metadata):
+def get_weak_imports(main_wasm):
+  dylink_sec = webassembly.parse_dylink_section(main_wasm)
+  for symbols in dylink_sec.import_info.values():
+    for symbol, flags in symbols.items():
+      if flags & webassembly.SYMBOL_BINDING_MASK == webassembly.SYMBOL_BINDING_WEAK:
+        settings.WEAK_IMPORTS.append(symbol)
+
+
+def update_settings_glue(wasm_file, metadata):
   optimize_syscalls(metadata['declares'])
 
   # Integrate info from backend
@@ -124,6 +132,8 @@ def update_settings_glue(metadata):
     syms = set(syms).difference(metadata['exports'])
     syms.update(metadata['globalImports'])
     settings.DEFAULT_LIBRARY_FUNCS_TO_INCLUDE = sorted(syms)
+    if settings.MAIN_MODULE:
+      get_weak_imports(wasm_file)
 
   settings.WASM_EXPORTS = metadata['exports'] + list(metadata['namedGlobals'].keys())
   # Store function exports so that Closure and metadce can track these even in
@@ -137,7 +147,7 @@ def update_settings_glue(metadata):
   if settings.MEMORY64:
     assert '--enable-memory64' in settings.BINARYEN_FEATURES
 
-  settings.HAS_MAIN = bool(settings.MAIN_MODULE) or settings.STANDALONE_WASM or 'main' in settings.WASM_EXPORTS
+  settings.HAS_MAIN = bool(settings.MAIN_MODULE) or settings.PROXY_TO_PTHREAD or settings.STANDALONE_WASM or 'main' in settings.WASM_EXPORTS or '__main_argc_argv' in settings.WASM_EXPORTS
 
   # When using dynamic linking the main function might be in a side module.
   # To be safe assume they do take input parametes.
@@ -210,19 +220,12 @@ def report_missing_symbols(js_library_funcs):
     # In this mode we never expect _main in the export list.
     return
 
-  # PROXY_TO_PTHREAD only makes sense with a main(), so error if one is
-  # missing. note that when main() might arrive from another module we cannot
-  # error here.
-  if settings.PROXY_TO_PTHREAD and '_main' not in defined_symbols and \
-     not settings.RELOCATABLE:
-    exit_with_error('PROXY_TO_PTHREAD proxies main() for you, but no main exists')
-
   if settings.IGNORE_MISSING_MAIN:
     # The default mode for emscripten is to ignore the missing main function allowing
     # maximum compatibility.
     return
 
-  if settings.EXPECT_MAIN and 'main' not in settings.WASM_EXPORTS:
+  if settings.EXPECT_MAIN and 'main' not in settings.WASM_EXPORTS and '__main_argc_argv' not in settings.WASM_EXPORTS:
     # For compatibility with the output of wasm-ld we use the same wording here in our
     # error message as if wasm-ld had failed (i.e. in LLD_REPORT_UNDEFINED mode).
     exit_with_error('entry symbol not defined (pass --no-entry to suppress): main')
@@ -297,12 +300,7 @@ def emscript(in_wasm, out_wasm, outfile_js, memfile):
 
   metadata = finalize_wasm(in_wasm, out_wasm, memfile)
 
-  if '__main_argc_argv' in metadata['exports']:
-    settings.MANGLED_MAIN = 1
-    metadata['exports'].remove('__main_argc_argv')
-    metadata['exports'].append('main')
-
-  update_settings_glue(metadata)
+  update_settings_glue(out_wasm, metadata)
 
   if not settings.WASM_BIGINT and metadata['emJsFuncs']:
     module = webassembly.Module(in_wasm)
@@ -749,29 +747,24 @@ def add_standard_wasm_imports(send_items_map):
 
 
 def create_sending(invoke_funcs, metadata):
-  em_js_funcs = set(metadata['emJsFuncs'].keys())
-  declares = [asmjs_mangle(d) for d in metadata['declares']]
-  externs = [asmjs_mangle(e) for e in metadata['globalImports']]
-  send_items = set(invoke_funcs + declares + externs)
-  send_items.update(em_js_funcs)
-
-  def fix_import_name(g):
-    # Unlike fastcomp the wasm backend doesn't use the '_' prefix for native
-    # symbols.  Emscripten currently expects symbols to start with '_' so we
-    # artificially add them to the output of emscripten-wasm-finalize and them
-    # strip them again here.
-    # note that we don't do this for EM_JS functions (which, rarely, may have
-    # a '_' prefix)
-    if g.startswith('_') and g not in em_js_funcs:
-      return g[1:]
-    return g
-
+  # Map of wasm imports to mangled/external/JS names
   send_items_map = OrderedDict()
-  for name in send_items:
-    internal_name = fix_import_name(name)
-    if internal_name in send_items_map:
-      exit_with_error('duplicate symbol in exports to wasm: %s', name)
-    send_items_map[internal_name] = name
+
+  def add_send_items(name, mangled_name, ignore_dups=False):
+    # Sanity check that the names of emJsFuncs, declares, and globalImports don't overlap
+    if not ignore_dups and name in send_items_map:
+      assert name not in send_items_map, 'duplicate symbol in exports: %s' % name
+    send_items_map[name] = mangled_name
+
+  for name in metadata['emJsFuncs']:
+    add_send_items(name, name)
+  for name in invoke_funcs:
+    add_send_items(name, name)
+  for name in metadata['declares']:
+    add_send_items(name, asmjs_mangle(name))
+  for name in metadata['globalImports']:
+    # globalImports can currently overlap with declares, in the case of dynamic linking
+    add_send_items(name, asmjs_mangle(name), ignore_dups=settings.RELOCATABLE)
 
   add_standard_wasm_imports(send_items_map)
 
@@ -786,8 +779,6 @@ def make_export_wrappers(exports, delay_assignment):
     if name == '__cpp_exception':
       continue
     mangled = asmjs_mangle(name)
-    if settings.MANGLED_MAIN and name == 'main':
-      name = '__main_argc_argv'
     # The emscripten stack functions are called very early (by writeStackCookie) before
     # the runtime is initialized so we can't create these wrappers that check for
     # runtimeInitialized.
@@ -845,8 +836,6 @@ def create_receiving(exports):
 
       for s in exports_that_are_not_initializers:
         mangled = asmjs_mangle(s)
-        if settings.MANGLED_MAIN and s == 'main':
-          s = '__main_argc_argv'
         dynCallAssignment = ('dynCalls["' + s.replace('dynCall_', '') + '"] = ') if generate_dyncall_assignment and mangled.startswith('dynCall_') else ''
         receiving += [dynCallAssignment + mangled + ' = asm["' + s + '"];']
     else:
@@ -962,6 +951,7 @@ def create_wasm64_wrappers(metadata):
     '__errno_location': 'p',
     'emscripten_builtin_memalign': 'ppp',
     'main': '__PP',
+    '__main_argc_argv': '__PP',
     'emscripten_stack_set_limits': '_pp',
     '__set_stack_limits': '_pp',
     '__cxa_can_catch': '_ppp',

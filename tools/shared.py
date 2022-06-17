@@ -47,7 +47,6 @@ from .settings import settings
 DEBUG_SAVE = DEBUG or int(os.environ.get('EMCC_DEBUG_SAVE', '0'))
 MINIMUM_NODE_VERSION = (4, 1, 1)
 EXPECTED_LLVM_VERSION = "15.0"
-PYTHON = sys.executable
 
 # Used only when EM_PYTHON_MULTIPROCESSING=1 env. var is set.
 multiprocessing_pool = None
@@ -104,6 +103,7 @@ def run_process(cmd, check=True, input=None, *args, **kw):
   sys.stdout.flush()
   sys.stderr.flush()
   kw.setdefault('universal_newlines', True)
+  kw.setdefault('encoding', 'utf-8')
   ret = subprocess.run(cmd, check=check, input=input, *args, **kw)
   debug_text = '%sexecuted %s' % ('successfully ' if check else '', shlex_join(cmd))
   logger.debug(debug_text)
@@ -567,10 +567,13 @@ def asmjs_mangle(name):
   Prepends '_' and replaces non-alphanumerics with '_'.
   Used by wasm backend for JS library consistency with asm.js.
   """
+  # We also use this function to convert the clang-mangled `__main_argc_argv`
+  # to simply `main` which is expected by the emscripten JS glue code.
+  if name == '__main_argc_argv':
+    name = 'main'
   if treat_as_user_function(name):
     return '_' + name
-  else:
-    return name
+  return name
 
 
 def reconfigure_cache():
@@ -701,6 +704,7 @@ EMCMAKE = bat_suffix(path_from_root('emcmake'))
 EMCONFIGURE = bat_suffix(path_from_root('emconfigure'))
 EM_NM = bat_suffix(path_from_root('emnm'))
 FILE_PACKAGER = bat_suffix(path_from_root('tools/file_packager'))
+WASM_SOURCEMAP = bat_suffix(path_from_root('tools/wasm-sourcemap'))
 
 setup_temp_dirs()
 
