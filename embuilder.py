@@ -43,6 +43,8 @@ MINIMAL_TASKS = [
     'libdlmalloc-noerrno',
     'libdlmalloc-tracing',
     'libdlmalloc-debug',
+    'libembind',
+    'libembind-rtti',
     'libemmalloc',
     'libemmalloc-debug',
     'libemmalloc-memvalidate',
