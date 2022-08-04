@@ -25,7 +25,7 @@ from . import utils
 from .shared import CLANG_CC, CLANG_CXX
 from .shared import LLVM_NM, EMCC, EMAR, EMXX, EMRANLIB, WASM_LD, LLVM_AR
 from .shared import LLVM_LINK, LLVM_OBJCOPY
-from .shared import try_delete, run_process, check_call, exit_with_error
+from .shared import run_process, check_call, exit_with_error
 from .shared import path_from_root
 from .shared import asmjs_mangle, DEBUG
 from .shared import TEMP_DIR
@@ -71,7 +71,7 @@ def extract_archive_contents(archive_files):
   unpack_temp_dir = tempfile.mkdtemp('_archive_contents', 'emscripten_temp_')
 
   def clean_at_exit():
-    try_delete(unpack_temp_dir)
+    utils.delete_dir(unpack_temp_dir)
   shared.atexit.register(clean_at_exit)
 
   archive_contents = []
@@ -521,7 +521,7 @@ def link_bitcode(args, target, force_archive_contents=False):
     scan_archive_group(current_archive_group)
     current_archive_group = None
 
-  try_delete(target)
+  utils.delete_file(target)
 
   # Finish link
   # tolerate people trying to link a.so a.so etc.
@@ -595,7 +595,7 @@ def parse_llvm_nm_symbols(output):
 
 
 def emar(action, output_filename, filenames, stdout=None, stderr=None, env=None):
-  try_delete(output_filename)
+  utils.delete_file(output_filename)
   cmd = [EMAR, action, output_filename] + filenames
   cmd = get_command_with_possible_response_file(cmd)
   run_process(cmd, stdout=stdout, stderr=stderr, env=env)
@@ -913,7 +913,7 @@ def run_closure_cmd(cmd, filename, env, pretty):
   # But it looks like it creates such files on Linux(?) even without setting that command line
   # flag (and currently we don't), so delete the produced source map file to not leak files in
   # temp directory.
-  try_delete(outfile + '.map')
+  utils.delete_file(outfile + '.map')
 
   # Print Closure diagnostics result up front.
   if proc.returncode != 0:
@@ -1251,7 +1251,10 @@ def emit_debug_on_side(wasm_file):
   # TODO(dschuff): Also strip the DATA section? To make this work we'd need to
   # either allow "invalid" data segment name entries, or maybe convert the DATA
   # to a DATACOUNT section.
-  strip(wasm_file_with_dwarf, wasm_file_with_dwarf, sections=['CODE'])
+  # TODO(https://github.com/emscripten-core/emscripten/issues/13084): Re-enable
+  # this code once the debugger extension can handle wasm files with name
+  # sections but no code sections.
+  # strip(wasm_file_with_dwarf, wasm_file_with_dwarf, sections=['CODE'])
 
   # embed a section in the main wasm to point to the file with external DWARF,
   # see https://yurydelendik.github.io/webassembly-dwarf/#external-DWARF
@@ -1354,12 +1357,12 @@ def is_wasm_dylib(filename):
   """Detect wasm dynamic libraries by the presence of the "dylink" custom section."""
   if not is_wasm(filename):
     return False
-  module = webassembly.Module(filename)
-  section = next(module.sections())
-  if section.type == webassembly.SecType.CUSTOM:
-    module.seek(section.offset)
-    if module.read_string() in ('dylink', 'dylink.0'):
-      return True
+  with webassembly.Module(filename) as module:
+    section = next(module.sections())
+    if section.type == webassembly.SecType.CUSTOM:
+      module.seek(section.offset)
+      if module.read_string() in ('dylink', 'dylink.0'):
+        return True
   return False
 
 
@@ -1533,10 +1536,8 @@ def run_binaryen_command(tool, infile, outfile=None, args=None, debug=False, std
 
 
 def run_wasm_opt(infile, outfile=None, args=[], **kwargs):  # noqa
-  if outfile and (settings.DEBUG_LEVEL < 3 or settings.GENERATE_SOURCE_MAP):
-    # remove any dwarf debug info sections, if the debug level is <3, as
-    # we don't need them; also remove them if we use source maps (which are
-    # implemented separately from dwarf).
+  if outfile and not settings.GENERATE_DWARF:
+    # remove any dwarf debug info sections if dwarf is not requested.
     # note that we add this pass first, so that it doesn't interfere with
     # the final set of passes (which may generate stack IR, and nothing
     # should be run after that)
