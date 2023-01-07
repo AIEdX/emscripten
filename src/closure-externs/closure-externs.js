@@ -11,8 +11,18 @@
  * The closure_compiler() method in tools/shared.py refers to this file when calling closure.
  */
 
-// Special placeholder for `import.meta`.
+// Special placeholder for `import.meta` and `await import`.
 var EMSCRIPTEN$IMPORT$META;
+var EMSCRIPTEN$AWAIT$IMPORT;
+
+// Don't minify createRequire
+var createRequire;
+
+// Don't minify startWorker which we use to start workers once the runtime is ready.
+/**
+ * @param {Object} Module
+ */
+var startWorker = function(Module) {};
 
 // Closure externs used by library_sockfs.js
 
@@ -114,6 +124,44 @@ WebAssembly.Memory.prototype.buffer;
  * @type {number}
  */
 WebAssembly.Table.prototype.length;
+
+/**
+ * @record
+ */
+function FunctionType() {}
+/**
+ * @type {Array<string>}
+ */
+FunctionType.prototype.parameters;
+/**
+ * @type {Array<string>}
+ */
+FunctionType.prototype.results;
+/**
+ * @record
+ */
+ function FunctionUsage() {}
+ /**
+  * @type {string|undefined}
+  */
+FunctionUsage.prototype.promising;
+ /**
+  * @type {string|undefined}
+  */
+FunctionUsage.prototype.suspending;
+
+/**
+ * @constructor
+ * @param {!FunctionType} type
+ * @param {!Function} func
+ * @param {FunctionUsage=} usage
+ */
+WebAssembly.Function = function(type, func, usage) {};
+/**
+ * @param {Function} func
+ * @return {FunctionType}
+ */
+WebAssembly.Function.type = function(func) {};
 
 /**
  * @suppress {undefinedVars}

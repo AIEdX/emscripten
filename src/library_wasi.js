@@ -22,7 +22,7 @@ var WasiLibrary = {
     throw 'exit(' + code + ')';
 #else
 #if RUNTIME_DEBUG
-    err('proc_exit: ' + code);
+    dbg('proc_exit: ' + code);
 #endif
     EXITSTATUS = code;
     if (!keepRuntimeAlive()) {
@@ -35,7 +35,7 @@ var WasiLibrary = {
       ABORT = true;
     }
     quit_(code, new ExitStatus(code));
-#endif
+#endif // MINIMAL_RUNTIME
   },
 
   $getEnvStrings__deps: ['$ENV', '$getExecutableName'],
@@ -206,6 +206,9 @@ var WasiLibrary = {
       if (curr < 0) return -1;
       ret += curr;
       if (curr < len) break; // nothing more to read
+      if (typeof offset !== 'undefined') {
+        offset += curr;
+      }
     }
     return ret;
   },
@@ -219,6 +222,9 @@ var WasiLibrary = {
       var curr = FS.write(stream, {{{ heapAndOffset('HEAP8', 'ptr') }}}, len, offset);
       if (curr < 0) return -1;
       ret += curr;
+      if (typeof offset !== 'undefined') {
+        offset += curr;
+      }
     }
     return ret;
   },
@@ -288,12 +294,13 @@ var WasiLibrary = {
     '$doWritev',
 #endif
   ].concat(i53ConversionDeps),
+  fd_pwrite__sig: 'iippjp',
   fd_pwrite: function(fd, iov, iovcnt, {{{ defineI64Param('offset') }}}, pnum) {
 #if SYSCALLS_REQUIRE_FILESYSTEM
     {{{ receiveI64ParamAsI53('offset', cDefine('EOVERFLOW')) }}}
     var stream = SYSCALLS.getStreamFromFD(fd)
     var num = doWritev(stream, iov, iovcnt, offset);
-    {{{ makeSetValue('pnum', 0, 'num', 'i32') }}};
+    {{{ makeSetValue('pnum', 0, 'num', SIZE_TYPE) }}};
     return 0;
 #elif ASSERTIONS
     abort('fd_pwrite called without SYSCALLS_REQUIRE_FILESYSTEM');
@@ -330,7 +337,7 @@ var WasiLibrary = {
 #if SYSCALLS_REQUIRE_FILESYSTEM
     var stream = SYSCALLS.getStreamFromFD(fd);
     var num = doReadv(stream, iov, iovcnt);
-    {{{ makeSetValue('pnum', 0, 'num', 'i32') }}};
+    {{{ makeSetValue('pnum', 0, 'num', SIZE_TYPE) }}};
     return 0;
 #elif ASSERTIONS
     abort('fd_read called without SYSCALLS_REQUIRE_FILESYSTEM');
@@ -350,7 +357,7 @@ var WasiLibrary = {
     {{{ receiveI64ParamAsI53('offset', cDefine('EOVERFLOW')) }}}
     var stream = SYSCALLS.getStreamFromFD(fd)
     var num = doReadv(stream, iov, iovcnt, offset);
-    {{{ makeSetValue('pnum', 0, 'num', 'i32') }}};
+    {{{ makeSetValue('pnum', 0, 'num', SIZE_TYPE) }}};
     return 0;
 #elif ASSERTIONS
     abort('fd_pread called without SYSCALLS_REQUIRE_FILESYSTEM');

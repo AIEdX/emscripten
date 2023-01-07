@@ -21,9 +21,9 @@ class TempFiles:
   def note(self, filename):
     self.to_clean.append(filename)
 
-  def get(self, suffix):
+  def get(self, suffix, prefix=None):
     """Returns a named temp file with the given prefix."""
-    named_file = tempfile.NamedTemporaryFile(dir=self.tmpdir, suffix=suffix, delete=False)
+    named_file = tempfile.NamedTemporaryFile(dir=self.tmpdir, suffix=suffix, prefix=prefix, delete=False)
     self.note(named_file.name)
     return named_file
 
@@ -39,7 +39,7 @@ class TempFiles:
         self_.file.close() # NamedTemporaryFile passes out open file handles, but callers prefer filenames (and open their own handles manually if needed)
         return self_.file.name
 
-      def __exit__(self_, type, value, traceback):
+      def __exit__(self_, _type, _value, _traceback):
         if not self.save_debug_files:
           utils.delete_file(self_.file.name)
     return TempFileObject()

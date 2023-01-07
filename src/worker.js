@@ -35,7 +35,7 @@ if (ENVIRONMENT_IS_NODE) {
     },
     Worker: nodeWorkerThreads.Worker,
     importScripts: function(f) {
-      (0, eval)(fs.readFileSync(f, 'utf8'));
+      (0, eval)(fs.readFileSync(f, 'utf8') + '//# sourceURL=' + f);
     },
     postMessage: function(msg) {
       parentPort.postMessage(msg);
@@ -85,6 +85,9 @@ var out = () => { throw 'out() is not defined in worker.js.'; }
 #endif
 var err = threadPrintErr;
 self.alert = threadAlert;
+#if RUNTIME_DEBUG
+var dbg = threadPrintErr;
+#endif
 
 #if !MINIMAL_RUNTIME
 Module['instantiateWasm'] = (info, receiveInstance) => {
@@ -111,15 +114,34 @@ self.onunhandledrejection = (e) => {
   throw e.reason ?? e;
 };
 
-self.onmessage = (e) => {
+function handleMessage(e) {
   try {
     if (e.data.cmd === 'load') { // Preload command that is called once per worker to parse and load the Emscripten code.
 #if PTHREADS_DEBUG
-      err('worker.js: loading module')
+      dbg('worker.js: loading module')
 #endif
 #if MINIMAL_RUNTIME
       var imports = {};
 #endif
+
+    // Until we initialize the runtime, queue up any further incoming messages.
+    let messageQueue = [];
+    self.onmessage = (e) => messageQueue.push(e);
+
+    // And add a callback for when the runtime is initialized.
+    self.startWorker = (instance) => {
+#if MODULARIZE
+      Module = instance;
+#endif
+      // Notify the main thread that this thread has loaded.
+      postMessage({ 'cmd': 'loaded' });
+      // Process any messages that were queued before the thread was ready.
+      for (let msg of messageQueue) {
+        handleMessage(msg);
+      }
+      // Restore the real message handler.
+      self.onmessage = handleMessage;
+    };
 
       // Module and memory were sent from main thread
 #if MINIMAL_RUNTIME
@@ -135,6 +157,14 @@ self.onmessage = (e) => {
 #if MAIN_MODULE
       Module['dynamicLibraries'] = e.data.dynamicLibraries;
 #endif
+
+      // Use `const` here to ensure that the variable is scoped only to
+      // that iteration, allowing safe reference from a closure.
+      for (const handler of e.data.handlers) {
+        Module[handler] = function() {
+          postMessage({ cmd: 'callHandler', handler, args: [...arguments] });
+        }
+      }
 
       {{{ makeAsmImportsAccessInPthread('wasmMemory') }}} = e.data.wasmMemory;
 
@@ -156,11 +186,8 @@ self.onmessage = (e) => {
 #endif
 
 #if MODULARIZE && EXPORT_ES6
-      (e.data.urlOrBlob ? import(e.data.urlOrBlob) : import('./{{{ TARGET_JS_NAME }}}')).then(function(exports) {
-        return exports.default(Module);
-      }).then(function(instance) {
-        Module = instance;
-      });
+      (e.data.urlOrBlob ? import(e.data.urlOrBlob) : import('./{{{ TARGET_JS_NAME }}}'))
+      .then(exports => exports.default(Module));
 #else
       if (typeof e.data.urlOrBlob == 'string') {
 #if TRUSTED_TYPES
@@ -183,29 +210,13 @@ self.onmessage = (e) => {
       }
 #if MODULARIZE
 #if MINIMAL_RUNTIME
-      {{{ EXPORT_NAME }}}(imports).then(function (instance) {
-        Module = instance;
-      });
+      {{{ EXPORT_NAME }}}(imports);
 #else
-      {{{ EXPORT_NAME }}}(Module).then(function (instance) {
-        Module = instance;
-      });
+      {{{ EXPORT_NAME }}}(Module);
 #endif
 #endif
 #endif // MODULARIZE && EXPORT_ES6
     } else if (e.data.cmd === 'run') {
-      // This worker was idle, and now should start executing its pthread entry
-      // point.
-      // performance.now() is specced to return a wallclock time in msecs since
-      // that Web Worker/main thread launched. However for pthreads this can
-      // cause subtle problems in emscripten_get_now() as this essentially
-      // would measure time from pthread_create(), meaning that the clocks
-      // between each threads would be wildly out of sync. Therefore sync all
-      // pthreads to the clock on the main browser thread, so that different
-      // threads see a somewhat coherent clock across each of them
-      // (+/- 0.1msecs in testing).
-      Module['__performance_now_clock_drift'] = performance.now() - e.data.time;
-
       // Pass the thread address to wasm to store it for fast access.
       Module['__emscripten_thread_init'](e.data.pthread_ptr, /*isMainBrowserThread=*/0, /*isMainRuntimeThread=*/0, /*canBlock=*/1);
 
@@ -220,7 +231,7 @@ self.onmessage = (e) => {
       if (!initializedJS) {
 #if EMBIND
 #if PTHREADS_DEBUG
-        err('Pthread 0x' + Module['_pthread_self']().toString(16) + ' initializing embind.');
+        dbg('Pthread 0x' + Module['_pthread_self']().toString(16) + ' initializing embind.');
 #endif
         // Embind must initialize itself on all threads, as it generates support JS.
         // We only do this once per worker since they get reused
@@ -273,7 +284,7 @@ self.onmessage = (e) => {
       }
     } else if (e.data.cmd === 'cancel') { // Main thread is asking for a pthread_cancel() on this thread.
       if (Module['_pthread_self']()) {
-        Module['__emscripten_thread_exit'](-1/*PTHREAD_CANCELED*/);
+        Module['__emscripten_thread_exit']({{{ cDefine('PTHREAD_CANCELED') }}});
       }
     } else if (e.data.target === 'setimmediate') {
       // no-op
@@ -284,16 +295,23 @@ self.onmessage = (e) => {
         // Defer executing this queue until the runtime is initialized.
         pendingNotifiedProxyingQueues.push(e.data.queue);
       }
-    } else {
+    } else if (e.data.cmd) {
+      // The received message looks like something that should be handled by this message
+      // handler, (since there is a e.data.cmd field present), but is not one of the
+      // recognized commands:
       err('worker.js received unknown command ' + e.data.cmd);
       err(e.data);
     }
   } catch(ex) {
+#if ASSERTIONS
     err('worker.js onmessage() captured an uncaught exception: ' + ex);
     if (ex && ex.stack) err(ex.stack);
+#endif
     if (Module['__emscripten_thread_crashed']) {
       Module['__emscripten_thread_crashed']();
     }
     throw ex;
   }
 };
+
+self.onmessage = handleMessage;

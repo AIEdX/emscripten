@@ -2,6 +2,9 @@
  * @license
  * Copyright 2015 The Emscripten Authors
  * SPDX-License-Identifier: MIT
+ *
+ * Because only modern JS engines support SAB we can use modern JS language
+ * features within this file (ES2020).
  */
 
 #if !USE_PTHREADS
@@ -21,9 +24,6 @@
 #endif
 #if EVAL_CTORS
 #error "EVAL_CTORS is not compatible with pthreads yet (passive segments)"
-#endif
-#if STANDALONE_WASM
-#error "STANDALONE_WASM does not support shared memories yet"
 #endif
 
 var LibraryPThread = {
@@ -70,10 +70,12 @@ var LibraryPThread = {
         return 'w:' + (Module['workerID'] || 0) + ',t:' + ptrToString(t) + ': ';
       }
 
-      // When PTHREAD_DEBUG is enabled, prefix all err() messages with the calling
-      // thread ID.
+      // When PTHREAD_DEBUG is enabled, prefix all err()/dbg() messages with the
+      // calling thread ID.
       var origErr = err;
       err = (message) => origErr(pthreadLogPrefix() + message);
+      var origDbg = dbg;
+      dbg = (message) => origDbg(pthreadLogPrefix() + message);
     },
 #endif
     init: function() {
@@ -90,7 +92,7 @@ var LibraryPThread = {
 #if PTHREAD_POOL_SIZE
       var pthreadPoolSize = {{{ PTHREAD_POOL_SIZE }}};
       // Start loading up the Worker pool, if requested.
-      for (var i = 0; i < pthreadPoolSize; ++i) {
+      while (pthreadPoolSize--) {
         PThread.allocateUnusedWorker();
       }
 #endif
@@ -157,13 +159,13 @@ var LibraryPThread = {
       assert(!ENVIRONMENT_IS_PTHREAD, 'Internal Error! terminateAllThreads() can only ever be called from main application thread!');
 #endif
 #if PTHREADS_DEBUG
-      err('terminateAllThreads');
+      dbg('terminateAllThreads');
 #endif
-      for (var t in PThread.pthreads) {
-        var worker = PThread.pthreads[t];
-        if (worker) {
-          PThread.returnWorkerToPool(worker);
-        }
+      for (var worker of Object.values(PThread.pthreads)) {
+#if ASSERTIONS
+        assert(worker);
+#endif
+        PThread.returnWorkerToPool(worker);
       }
 
 #if ASSERTIONS
@@ -173,8 +175,7 @@ var LibraryPThread = {
       assert(PThread.runningWorkers.length === 0);
 #endif
 
-      for (var i = 0; i < PThread.unusedWorkers.length; ++i) {
-        var worker = PThread.unusedWorkers[i];
+      for (var worker of PThread.unusedWorkers) {
 #if ASSERTIONS
         // This Worker should not be hosting a pthread at this time.
         assert(!worker.pthread_ptr);
@@ -201,6 +202,15 @@ var LibraryPThread = {
       // worker pool as an unused worker.
       worker.pthread_ptr = 0;
 
+#if ENVIRONMENT_MAY_BE_NODE
+      if (ENVIRONMENT_IS_NODE) {
+        // Once a pthread has finished and the worker becomes idle, mark it
+        // as weakly referenced so that its existence does not prevent Node.js
+        // from exiting.
+        worker.unref();
+      }
+#endif
+
       // Finally, free the underlying (and now-unused) pthread structure in
       // linear memory.
       __emscripten_thread_free_data(pthread_ptr);
@@ -219,19 +229,17 @@ var LibraryPThread = {
     // Called by worker.js each time a thread is started.
     threadInitTLS: function() {
 #if PTHREADS_DEBUG
-      err('threadInitTLS.');
+      dbg('threadInitTLS.');
 #endif
       // Call thread init functions (these are the _emscripten_tls_init for each
       // module loaded.
-      for (var i in PThread.tlsInitFunctions) {
-        if (PThread.tlsInitFunctions.hasOwnProperty(i)) PThread.tlsInitFunctions[i]();
-      }
+      PThread.tlsInitFunctions.forEach((f) => f());
     },
-    // Loads the WebAssembly module into the given list of Workers.
+    // Loads the WebAssembly module into the given Worker.
     // onFinishedLoading: A callback function that will be called once all of
     //                    the workers have been initialized and are
     //                    ready to host pthreads.
-    loadWasmModuleToWorker: function(worker, onFinishedLoading) {
+    loadWasmModuleToWorker: (worker) => new Promise((onFinishedLoading) => {
       worker.onmessage = (e) => {
         var d = e['data'];
         var cmd = d['cmd'];
@@ -265,12 +273,16 @@ var LibraryPThread = {
           cancelThread(d['thread']);
         } else if (cmd === 'loaded') {
           worker.loaded = true;
-          if (onFinishedLoading) onFinishedLoading(worker);
-          // If this Worker is already pending to start running a thread, launch the thread now
-          if (worker.runPthread) {
-            worker.runPthread();
-            delete worker.runPthread;
+#if ENVIRONMENT_MAY_BE_NODE
+          // Check that this worker doesn't have an associated pthread.
+          if (ENVIRONMENT_IS_NODE && !worker.pthread_ptr) {
+            // Once worker is loaded & idle, mark it as weakly referenced,
+            // so that mere existence of a Worker in the pool does not prevent
+            // Node.js from exiting the app.
+            worker.unref();
           }
+#endif
+          onFinishedLoading(worker);
         } else if (cmd === 'print') {
           out('Thread ' + d['threadId'] + ': ' + d['text']);
         } else if (cmd === 'printErr') {
@@ -281,10 +293,8 @@ var LibraryPThread = {
           // Worker wants to postMessage() to itself to implement setImmediate()
           // emulation.
           worker.postMessage(d);
-        } else if (cmd === 'onAbort') {
-          if (Module['onAbort']) {
-            Module['onAbort'](d['arg']);
-          }
+        } else if (cmd === 'callHandler') {
+          Module[d['handler']](...d['args']);
         } else if (cmd) {
           // The received message looks like something that should be handled by this message
           // handler, (since there is a e.data.cmd field present), but is not one of the
@@ -325,9 +335,33 @@ var LibraryPThread = {
       assert(wasmModule instanceof WebAssembly.Module, 'WebAssembly Module should have been loaded by now!');
 #endif
 
+      // When running on a pthread, none of the incoming parameters on the module
+      // object are present. Proxy known handlers back to the main thread if specified.
+      var handlers = [];
+      var knownHandlers = [
+#if expectToReceiveOnModule('onExit')
+        'onExit',
+#endif
+#if expectToReceiveOnModule('onAbort')
+        'onAbort',
+#endif
+#if expectToReceiveOnModule('print')
+        'print',
+#endif
+#if expectToReceiveOnModule('printErr')
+        'printErr',
+#endif
+      ];
+      for (var handler of knownHandlers) {
+        if (Module.hasOwnProperty(handler)) {
+          handlers.push(handler);
+        }
+      }
+
       // Ask the new worker to load up the Emscripten-compiled page. This is a heavy operation.
       worker.postMessage({
         'cmd': 'load',
+        'handlers': handlers,
         // If the application main .js file was loaded from a Blob, then it is not possible
         // to access the URL of the current script that could be passed to a Web Worker so that
         // it could load up the same file. In that case, developer must either deliver the Blob
@@ -360,10 +394,38 @@ var LibraryPThread = {
         'workerID': PThread.nextWorkerID++,
 #endif
       });
+    }),
+
+    loadWasmModuleToAllWorkers: function(onMaybeReady) {
+#if !PTHREAD_POOL_SIZE
+      onMaybeReady();
+#else
+      // Instantiation is synchronous in pthreads.
+      if (
+        ENVIRONMENT_IS_PTHREAD
+#if WASM_WORKERS
+        || ENVIRONMENT_IS_WASM_WORKER
+#endif
+      ) {
+        return onMaybeReady();
+      }
+      let pthreadPoolReady = Promise.all(PThread.unusedWorkers.map(PThread.loadWasmModuleToWorker));
+#if PTHREAD_POOL_DELAY_LOAD
+      // PTHREAD_POOL_DELAY_LOAD means we want to proceed synchronously without
+      // waiting for the pthread pool during the startup phase.
+      // If the user wants to wait on it elsewhere, they can do so via the
+      // Module['pthreadPoolReady'] promise.
+      Module['pthreadPoolReady'] = pthreadPoolReady;
+      onMaybeReady();
+#else
+      pthreadPoolReady.then(onMaybeReady);
+#endif // PTHREAD_POOL_DELAY_LOAD
+#endif // PTHREAD_POOL_SIZE
     },
 
     // Creates a new web Worker and places it in the unused worker pool to wait for its use.
     allocateUnusedWorker: function() {
+      var worker;
 #if MINIMAL_RUNTIME
       var pthreadMainJs = Module['worker'];
 #else
@@ -371,7 +433,7 @@ var LibraryPThread = {
       // If we're using module output and there's no explicit override, use bundler-friendly pattern.
       if (!Module['locateFile']) {
 #if PTHREADS_DEBUG
-        err('Allocating a new web worker from ' + new URL('{{{ PTHREAD_WORKER_FILE }}}', import.meta.url));
+        dbg('Allocating a new web worker from ' + new URL('{{{ PTHREAD_WORKER_FILE }}}', import.meta.url));
 #endif
 #if TRUSTED_TYPES
         // Use Trusted Types compatible wrappers.
@@ -384,12 +446,11 @@ var LibraryPThread = {
               }
             }
           );
-          PThread.unusedWorkers.push(new Worker(p.createScriptURL('ignored')));
+          worker = new Worker(p.createScriptURL('ignored'));
         } else
 #endif
-        PThread.unusedWorkers.push(new Worker(new URL('{{{ PTHREAD_WORKER_FILE }}}', import.meta.url)));
-        return;
-      }
+        worker = new Worker(new URL('{{{ PTHREAD_WORKER_FILE }}}', import.meta.url));
+      } else {
 #endif
       // Allow HTML module to configure the location where the 'worker.js' file will be loaded from,
       // via Module.locateFile() function. If not specified, then the default URL 'worker.js' relative
@@ -397,38 +458,51 @@ var LibraryPThread = {
       var pthreadMainJs = locateFile('{{{ PTHREAD_WORKER_FILE }}}');
 #endif
 #if PTHREADS_DEBUG
-      err('Allocating a new web worker from ' + pthreadMainJs);
+      dbg('Allocating a new web worker from ' + pthreadMainJs);
 #endif
 #if TRUSTED_TYPES
       // Use Trusted Types compatible wrappers.
       if (typeof trustedTypes != 'undefined' && trustedTypes.createPolicy) {
         var p = trustedTypes.createPolicy('emscripten#workerPolicy2', { createScriptURL: function(ignored) { return pthreadMainJs } });
-        PThread.unusedWorkers.push(new Worker(p.createScriptURL('ignored')));
+        worker = new Worker(p.createScriptURL('ignored'));
       } else
 #endif
-      PThread.unusedWorkers.push(new Worker(pthreadMainJs));
+      worker = new Worker(pthreadMainJs);
+#if EXPORT_ES6 && USE_ES6_IMPORT_META
+    }
+#endif
+    PThread.unusedWorkers.push(worker);
     },
 
     getNewWorker: function() {
       if (PThread.unusedWorkers.length == 0) {
-#if !PROXY_TO_PTHREAD && PTHREAD_POOL_SIZE_STRICT
+// PTHREAD_POOL_SIZE_STRICT should show a warning and, if set to level `2`, return from the function.
+#if (PTHREAD_POOL_SIZE_STRICT && ASSERTIONS) || PTHREAD_POOL_SIZE_STRICT == 2
+// However, if we're in Node.js, then we can create new workers on the fly and PTHREAD_POOL_SIZE_STRICT
+// should be ignored altogether.
+#if ENVIRONMENT_MAY_BE_NODE
+        if (!ENVIRONMENT_IS_NODE) {
+#endif
 #if ASSERTIONS
-        err('Tried to spawn a new thread, but the thread pool is exhausted.\n' +
-        'This might result in a deadlock unless some threads eventually exit or the code explicitly breaks out to the event loop.\n' +
-        'If you want to increase the pool size, use setting `-sPTHREAD_POOL_SIZE=...`.'
+            err('Tried to spawn a new thread, but the thread pool is exhausted.\n' +
+            'This might result in a deadlock unless some threads eventually exit or the code explicitly breaks out to the event loop.\n' +
+            'If you want to increase the pool size, use setting `-sPTHREAD_POOL_SIZE=...`.'
 #if PTHREAD_POOL_SIZE_STRICT == 1
-        + '\nIf you want to throw an explicit error instead of the risk of deadlocking in those cases, use setting `-sPTHREAD_POOL_SIZE_STRICT=2`.'
+              + '\nIf you want to throw an explicit error instead of the risk of deadlocking in those cases, use setting `-sPTHREAD_POOL_SIZE_STRICT=2`.'
 #endif
-        );
+            );
 #endif // ASSERTIONS
-
 #if PTHREAD_POOL_SIZE_STRICT == 2
-        // Don't return a Worker, which will translate into an EAGAIN error.
-        return;
+            return;
 #endif
+#if ENVIRONMENT_MAY_BE_NODE
+        }
 #endif
+#endif // PTHREAD_POOL_SIZE_STRICT
+#if PTHREAD_POOL_SIZE_STRICT < 2 || ENVIRONMENT_MAY_BE_NODE
         PThread.allocateUnusedWorker();
         PThread.loadWasmModuleToWorker(PThread.unusedWorkers[0]);
+#endif
       }
       return PThread.unusedWorkers.pop();
     }
@@ -437,7 +511,7 @@ var LibraryPThread = {
   $killThread__deps: ['_emscripten_thread_free_data'],
   $killThread: function(pthread_ptr) {
 #if PTHREADS_DEBUG
-    err('killThread ' + ptrToString(pthread_ptr));
+    dbg('killThread ' + ptrToString(pthread_ptr));
 #endif
 #if ASSERTIONS
     assert(!ENVIRONMENT_IS_PTHREAD, 'Internal Error! killThread() can only ever be called from main application thread!');
@@ -476,7 +550,7 @@ var LibraryPThread = {
 #if MAIN_MODULE
   $registerTLSInit: function(tlsInitFunc, moduleExports, metadata) {
 #if DYLINK_DEBUG
-    err("registerTLSInit: " + tlsInitFunc);
+    dbg("registerTLSInit: " + tlsInitFunc);
 #endif
     // In relocatable builds, we use the result of calling tlsInitFunc
     // (`_emscripten_tls_init`) to relocate the TLS exports of the module
@@ -484,7 +558,7 @@ var LibraryPThread = {
     function tlsInitWrapper() {
       var __tls_base = tlsInitFunc();
 #if DYLINK_DEBUG
-      err('tlsInit -> ' + __tls_base);
+      dbg('tlsInit -> ' + __tls_base);
 #endif
       if (!__tls_base) {
 #if ASSERTIONS
@@ -557,15 +631,15 @@ var LibraryPThread = {
     msg.moduleCanvasId = threadParams.moduleCanvasId;
     msg.offscreenCanvases = threadParams.offscreenCanvases;
 #endif
-    worker.runPthread = () => {
-      // Ask the worker to start executing its pthread entry point function.
-      msg.time = performance.now();
-      worker.postMessage(msg, threadParams.transferList);
-    };
-    if (worker.loaded) {
-      worker.runPthread();
-      delete worker.runPthread;
+    // Ask the worker to start executing its pthread entry point function.
+#if ENVIRONMENT_MAY_BE_NODE
+    if (ENVIRONMENT_IS_NODE) {
+      // Mark worker as strongly referenced once we start executing a pthread,
+      // so that Node.js doesn't exit while the pthread is running.
+      worker.ref();
     }
+#endif
+    worker.postMessage(msg, threadParams.transferList);
     return 0;
   },
 
@@ -599,8 +673,8 @@ var LibraryPThread = {
   $pthreadCreateProxied__internal: true,
   $pthreadCreateProxied__proxy: 'sync',
   $pthreadCreateProxied__deps: ['__pthread_create_js'],
-  $pthreadCreateProxied: function(pthread_ptr, attr, start_routine, arg) {
-    return ___pthread_create_js(pthread_ptr, attr, start_routine, arg);
+  $pthreadCreateProxied: function(pthread_ptr, attr, startRoutine, arg) {
+    return ___pthread_create_js(pthread_ptr, attr, startRoutine, arg);
   },
 
   // ASan wraps the emscripten_builtin_pthread_create call in
@@ -612,14 +686,18 @@ var LibraryPThread = {
   // allocations from __pthread_create_js we could also remove this.
   __pthread_create_js__noleakcheck: true,
   __pthread_create_js__sig: 'iiiii',
-  __pthread_create_js__deps: ['$spawnThread', 'pthread_self', '$pthreadCreateProxied'],
-  __pthread_create_js: function(pthread_ptr, attr, start_routine, arg) {
+  __pthread_create_js__deps: ['$spawnThread', 'pthread_self', '$pthreadCreateProxied',
+#if OFFSCREENCANVAS_SUPPORT
+    'malloc',
+#endif
+  ],
+  __pthread_create_js: function(pthread_ptr, attr, startRoutine, arg) {
     if (typeof SharedArrayBuffer == 'undefined') {
       err('Current environment does not support SharedArrayBuffer, pthreads are not available!');
       return {{{ cDefine('EAGAIN') }}};
     }
 #if PTHREADS_DEBUG
-    err("createThread: " + ptrToString(pthread_ptr));
+    dbg("createThread: " + ptrToString(pthread_ptr));
 #endif
 
     // List of JS objects that will transfer ownership to the Worker hosting the thread
@@ -641,11 +719,12 @@ var LibraryPThread = {
     if (transferredCanvasNames) transferredCanvasNames = UTF8ToString(transferredCanvasNames).trim();
     if (transferredCanvasNames) transferredCanvasNames = transferredCanvasNames.split(',');
 #if GL_DEBUG
-    err('pthread_create: transferredCanvasNames="' + transferredCanvasNames + '"');
+    dbg('pthread_create: transferredCanvasNames="' + transferredCanvasNames + '"');
 #endif
 
     var offscreenCanvases = {}; // Dictionary of OffscreenCanvas objects we'll transfer to the created thread to own
     var moduleCanvasId = Module['canvas'] ? Module['canvas'].id : '';
+    // Note that transferredCanvasNames might be null (so we cannot do a for-of loop).
     for (var i in transferredCanvasNames) {
       var name = transferredCanvasNames[i].trim();
       var offscreenCanvasInfo;
@@ -679,7 +758,7 @@ var LibraryPThread = {
           }
           if (canvas.transferControlToOffscreen) {
 #if GL_DEBUG
-            err('pthread_create: canvas.transferControlToOffscreen(), transferring canvas by name "' + name + '" (DOM id="' + canvas.id + '") from main thread to pthread');
+            dbg('pthread_create: canvas.transferControlToOffscreen(), transferring canvas by name "' + name + '" (DOM id="' + canvas.id + '") from main thread to pthread');
 #endif
             // Create a shared information block in heap so that we can control
             // the canvas size from any thread.
@@ -721,13 +800,13 @@ var LibraryPThread = {
         return {{{ cDefine('EINVAL') }}}; // Hitting this might indicate an implementation bug or some other internal error
       }
     }
-#endif
+#endif // OFFSCREENCANVAS_SUPPORT
 
     // Synchronously proxy the thread creation to main thread if possible. If we
     // need to transfer ownership of objects, then proxy asynchronously via
     // postMessage.
     if (ENVIRONMENT_IS_PTHREAD && (transferList.length === 0 || error)) {
-      return pthreadCreateProxied(pthread_ptr, attr, start_routine, arg);
+      return pthreadCreateProxied(pthread_ptr, attr, startRoutine, arg);
     }
 
     // If on the main thread, and accessing Canvas/OffscreenCanvas failed, abort
@@ -737,21 +816,21 @@ var LibraryPThread = {
 #if OFFSCREENCANVAS_SUPPORT
     // Register for each of the transferred canvases that the new thread now
     // owns the OffscreenCanvas.
-    for (var i in offscreenCanvases) {
+    for (var canvas of Object.values(offscreenCanvases)) {
       // pthread ptr to the thread that owns this canvas.
-      {{{ makeSetValue('offscreenCanvases[i].canvasSharedPtr', 8, 'pthread_ptr', 'i32') }}};
+      {{{ makeSetValue('canvas.canvasSharedPtr', 8, 'pthread_ptr', 'i32') }}};
     }
 #endif
 
     var threadParams = {
-      startRoutine: start_routine,
-      pthread_ptr: pthread_ptr,
-      arg: arg,
+      startRoutine,
+      pthread_ptr,
+      arg,
 #if OFFSCREENCANVAS_SUPPORT
-      moduleCanvasId: moduleCanvasId,
-      offscreenCanvases: offscreenCanvases,
+      moduleCanvasId,
+      offscreenCanvases,
 #endif
-      transferList: transferList
+      transferList,
     };
 
     if (ENVIRONMENT_IS_PTHREAD) {
@@ -811,7 +890,7 @@ var LibraryPThread = {
   $exitOnMainThread__proxy: 'async',
   $exitOnMainThread: function(returnCode) {
 #if PTHREADS_DEBUG
-    err('exitOnMainThread');
+    dbg('exitOnMainThread');
 #endif
 #if MINIMAL_RUNTIME
     _exit(returnCode);
@@ -835,10 +914,13 @@ var LibraryPThread = {
     var numCallArgs = arguments.length - 2;
     var outerArgs = arguments;
 #if ASSERTIONS
-    if (numCallArgs > {{{ cDefine('EM_QUEUED_JS_CALL_MAX_ARGS') }}}-1) throw 'emscripten_proxy_to_main_thread_js: Too many arguments ' + numCallArgs + ' to proxied function idx=' + index + ', maximum supported is ' + ({{{ cDefine('EM_QUEUED_JS_CALL_MAX_ARGS') }}}-1) + '!';
+    var maxArgs = {{{ cDefine('EM_QUEUED_JS_CALL_MAX_ARGS') - 1 }}};
+    if (numCallArgs > maxArgs) {
+      throw 'emscripten_proxy_to_main_thread_js: Too many arguments ' + numCallArgs + ' to proxied function idx=' + index + ', maximum supported is ' + maxArgs;
+    }
 #endif
     // Allocate a buffer, which will be copied by the C code.
-    return withStackSave(function() {
+    return withStackSave(() => {
       // First passed parameter specifies the number of arguments to the function.
       // When BigInt support is enabled, we must handle types in a more complex
       // way, detecting at runtime if a value is a BigInt or not (as we have no
@@ -918,7 +1000,7 @@ var LibraryPThread = {
     var stackSize = {{{ makeGetValue('pthread_ptr', C_STRUCTS.pthread.stack_size, 'i32') }}};
     var stackMax = stackTop - stackSize;
 #if PTHREADS_DEBUG
-    err('establishStackSpace: ' + ptrToString(stackTop) + ' -> ' + ptrToString(stackMax));
+    dbg('establishStackSpace: ' + ptrToString(stackTop) + ' -> ' + ptrToString(stackMax));
 #endif
 #if ASSERTIONS
     assert(stackTop != 0);
@@ -952,7 +1034,7 @@ var LibraryPThread = {
   $invokeEntryPoint__deps: ['_emscripten_thread_exit'],
   $invokeEntryPoint: function(ptr, arg) {
 #if PTHREADS_DEBUG
-    err('invokeEntryPoint: ' + ptrToString(ptr));
+    dbg('invokeEntryPoint: ' + ptrToString(ptr));
 #endif
 #if MAIN_MODULE
     // Before we call the thread entry point, make sure any shared libraries

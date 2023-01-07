@@ -29,8 +29,17 @@ var SIDE_MODULE_EXPORTS = [];
 // module (or other side modules) will need to provide.
 var SIDE_MODULE_IMPORTS = [];
 
-// Like EXPORTED_FUNCTIONS, but will not error if symbol is missing
-var EXPORT_IF_DEFINED = ['__start_em_asm', '__stop_em_asm'];
+// Like EXPORTED_FUNCTIONS, but will not error if symbol is missing.
+// The start/stop symbols are included by default so that then can be extracted
+// from the binary and embedded into the generated JS.  The PostEmscripten pass
+// in binaryen will then strip these exports so they will not appear in the
+// final shipping binary.
+// They are included here rather than in REQUIRED_EXPORTS because not all
+// programs contains EM_JS or EM_ASM data section, in which case these symbols
+// won't exist.
+var EXPORT_IF_DEFINED = ['__start_em_asm', '__stop_em_asm',
+                         '__start_em_lib_deps', '__stop_em_lib_deps',
+                         '__start_em_js', '__stop_em_js'];
 
 // Like EXPORTED_FUNCTIONS, but symbol is required to exist in native code.
 // This means wasm-ld will fail if these symbols are missing.
@@ -160,7 +169,7 @@ var TARGET_NOT_SUPPORTED = 0x7FFFFFFF;
 // Wasm backend symbols that are considered system symbols and don't
 // have the normal C symbol name mangled applied (== prefix with an underscore)
 // (Also implicily on this list is any function that starts with string "dynCall_")
-var WASM_SYSTEM_EXPORTS = ['stackAlloc', 'stackSave', 'stackRestore'];
+var WASM_SYSTEM_EXPORTS = ['stackAlloc', 'stackSave', 'stackRestore', 'getTempRet0', 'setTempRet0'];
 
 // Internal: value of -flto argument (either full or thin)
 var LTO = 0;
@@ -179,11 +188,6 @@ var SEPARATE_DWARF = false;
 
 // New WebAssembly exception handling
 var WASM_EXCEPTIONS = false;
-
-// Used internally when running the JS compiler simply to generate list of all
-// JS symbols. This is used by LLD_REPORT_UNDEFINED to generate a list of all
-// JS library symbols.
-var ONLY_CALC_JS_SYMBOLS = false;
 
 // Set to true if the program has a main function.  By default this is
 // enabled, but if `--no-entry` is passed, or if `_main` is not part of
@@ -206,8 +210,8 @@ var GENERATE_DWARF = false;
 
 // Memory layout.  These are only used/set in RELOCATABLE builds.  Otherwise
 // memory layout is fixed in the wasm binary at link time.
-var STACK_BASE = 0;
-var STACK_MAX = 0;
+var STACK_HIGH = 0;
+var STACK_LOW = 0;
 var HEAP_BASE = 0;
 
 // Used internally. set when there is a main() function.
@@ -235,3 +239,5 @@ var ALL_INCOMING_MODULE_JS_API = [];
 // when weak symbols are undefined.  Only applies in the case of dyanmic linking
 // (MAIN_MODULE).
 var WEAK_IMPORTS = [];
+
+var STACK_FIRST = false;

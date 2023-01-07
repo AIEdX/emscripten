@@ -107,8 +107,6 @@ function _free() {
 // Memory management
 
 var HEAP,
-/** @type {!ArrayBuffer} */
-  buffer,
 /** @type {!Int8Array} */
   HEAP8,
 /** @type {!Uint8Array} */
@@ -138,42 +136,34 @@ var HEAP,
 var HEAP_DATA_VIEW;
 #endif
 
-#if USE_PTHREADS
-if (ENVIRONMENT_IS_PTHREAD) {
-  // Grab imports from the pthread to local scope.
-  buffer = Module['buffer'];
-  // Note that not all runtime fields are imported above
-}
-#endif
-
-function updateGlobalBufferAndViews(buf) {
-  buffer = buf;
+function updateMemoryViews() {
+  var b = wasmMemory.buffer;
 #if SUPPORT_BIG_ENDIAN
-  Module['HEAP_DATA_VIEW'] = HEAP_DATA_VIEW = new DataView(buf);
+  Module['HEAP_DATA_VIEW'] = HEAP_DATA_VIEW = new DataView(b);
 #endif
-  Module['HEAP8'] = HEAP8 = new Int8Array(buf);
-  Module['HEAP16'] = HEAP16 = new Int16Array(buf);
-  Module['HEAP32'] = HEAP32 = new Int32Array(buf);
-  Module['HEAPU8'] = HEAPU8 = new Uint8Array(buf);
-  Module['HEAPU16'] = HEAPU16 = new Uint16Array(buf);
-  Module['HEAPU32'] = HEAPU32 = new Uint32Array(buf);
-  Module['HEAPF32'] = HEAPF32 = new Float32Array(buf);
-  Module['HEAPF64'] = HEAPF64 = new Float64Array(buf);
+  Module['HEAP8'] = HEAP8 = new Int8Array(b);
+  Module['HEAP16'] = HEAP16 = new Int16Array(b);
+  Module['HEAP32'] = HEAP32 = new Int32Array(b);
+  Module['HEAPU8'] = HEAPU8 = new Uint8Array(b);
+  Module['HEAPU16'] = HEAPU16 = new Uint16Array(b);
+  Module['HEAPU32'] = HEAPU32 = new Uint32Array(b);
+  Module['HEAPF32'] = HEAPF32 = new Float32Array(b);
+  Module['HEAPF64'] = HEAPF64 = new Float64Array(b);
 #if WASM_BIGINT
-  Module['HEAP64'] = HEAP64 = new BigInt64Array(buf);
-  Module['HEAPU64'] = HEAPU64 = new BigUint64Array(buf);
+  Module['HEAP64'] = HEAP64 = new BigInt64Array(b);
+  Module['HEAPU64'] = HEAPU64 = new BigUint64Array(b);
 #endif
 }
 
-var TOTAL_STACK = {{{ TOTAL_STACK }}};
+var STACK_SIZE = {{{ STACK_SIZE }}};
 #if ASSERTIONS
-if (Module['TOTAL_STACK']) assert(TOTAL_STACK === Module['TOTAL_STACK'], 'the stack size can no longer be determined at runtime')
+if (Module['STACK_SIZE']) assert(STACK_SIZE === Module['STACK_SIZE'], 'the stack size can no longer be determined at runtime')
 #endif
 
 {{{ makeModuleReceiveWithVar('INITIAL_MEMORY', undefined, INITIAL_MEMORY) }}}
 
 #if ASSERTIONS
-assert(INITIAL_MEMORY >= TOTAL_STACK, 'INITIAL_MEMORY should be larger than TOTAL_STACK, was ' + INITIAL_MEMORY + '! (TOTAL_STACK=' + TOTAL_STACK + ')');
+assert(INITIAL_MEMORY >= STACK_SIZE, 'INITIAL_MEMORY should be larger than STACK_SIZE, was ' + INITIAL_MEMORY + '! (STACK_SIZE=' + STACK_SIZE + ')');
 
 // check for full engine support (use string 'subarray' to avoid closure compiler confusion)
 assert(typeof Int32Array != 'undefined' && typeof Float64Array !== 'undefined' && Int32Array.prototype.subarray != undefined && Int32Array.prototype.set != undefined,
@@ -286,9 +276,9 @@ function preMain() {
 #if EXIT_RUNTIME
 function exitRuntime() {
 #if RUNTIME_DEBUG
-  err('exitRuntime');
+  dbg('exitRuntime');
 #endif
-#if ASYNCIFY && ASSERTIONS
+#if ASYNCIFY == 1 && ASSERTIONS
   // ASYNCIFY cannot be used once the runtime starts shutting down.
   Asyncify.state = Asyncify.State.Disabled;
 #endif
@@ -455,20 +445,8 @@ function removeRunDependency(id) {
 /** @param {string|number=} what */
 function abort(what) {
 #if expectToReceiveOnModule('onAbort')
-#if USE_PTHREADS
-  // When running on a pthread, none of the incoming parameters on the module
-  // object are present.  The `onAbort` handler only exists on the main thread
-  // and so we need to proxy the handling of these back to the main thread.
-  // TODO(sbc): Extend this to all such handlers that can be passed into on
-  // module creation.
-  if (ENVIRONMENT_IS_PTHREAD) {
-    postMessage({ 'cmd': 'onAbort', 'arg': what});
-  } else
-#endif
-  {
-    if (Module['onAbort']) {
-      Module['onAbort'](what);
-    }
+  if (Module['onAbort']) {
+    Module['onAbort'](what);
   }
 #endif
 
@@ -482,6 +460,10 @@ function abort(what) {
 
 #if ASSERTIONS == 0
   what += '. Build with -sASSERTIONS for more info.';
+#elif ASYNCIFY == 1
+  if (what.indexOf('RuntimeError: unreachable') >= 0) {
+    what += '. "unreachable" may be due to ASYNCIFY_STACK_SIZE not being large enough (try increasing it)';
+  }
 #endif // ASSERTIONS
 
   // Use a wasm runtime error, because a JS error might be seen as a foreign
@@ -649,7 +631,7 @@ if (Module['locateFile']) {
 #if EXPORT_ES6 && USE_ES6_IMPORT_META && !SINGLE_FILE // in single-file mode, repeating WASM_BINARY_FILE would emit the contents again
 } else {
   // Use bundler-friendly `new URL(..., import.meta.url)` pattern; works in browsers too.
-  wasmBinaryFile = new URL('{{{ WASM_BINARY_FILE }}}', import.meta.url).toString();
+  wasmBinaryFile = new URL('{{{ WASM_BINARY_FILE }}}', import.meta.url).href;
 }
 #endif
 
@@ -752,7 +734,7 @@ var splitModuleProxyHandler = {
 #if LOAD_SOURCE_MAP
 function receiveSourceMapJSON(sourceMap) {
   wasmSourceMap = new WasmSourceMap(sourceMap);
-  {{{ runOnMainThread("removeRunDependency('source-map');") }}}
+  {{{ runIfMainThread("removeRunDependency('source-map');") }}}
 }
 #endif
 
@@ -771,7 +753,6 @@ function instantiateSync(file, info) {
       // to load ok, but we do actually recompile the binary every time).
       var cachedCodeFile = '{{{ WASM_BINARY_FILE }}}.' + v8.cachedDataVersionTag() + '.cached';
       cachedCodeFile = locateFile(cachedCodeFile);
-      requireNodeFS();
       var hasCached = fs.existsSync(cachedCodeFile);
       if (hasCached) {
 #if RUNTIME_LOGGING
@@ -858,10 +839,6 @@ function createWasm() {
     exports = relocateExports(exports, {{{ GLOBAL_BASE }}});
 #endif
 
-#if MEMORY64
-    exports = instrumentWasmExportsForMemory64(exports);
-#endif
-
 #if ASYNCIFY
     exports = Asyncify.instrumentWasmExports(exports);
 #endif
@@ -869,8 +846,6 @@ function createWasm() {
 #if ABORT_ON_WASM_EXCEPTIONS
     exports = instrumentWasmExportsWithAbort(exports);
 #endif
-
-    Module['asm'] = exports;
 
 #if MAIN_MODULE
     var metadata = getDylinkMetadata(module);
@@ -881,6 +856,12 @@ function createWasm() {
 #endif
     mergeLibSymbols(exports, 'main')
 #endif
+
+#if MEMORY64
+    exports = instrumentWasmExportsForMemory64(exports);
+#endif
+
+    Module['asm'] = exports;
 
 #if USE_PTHREADS
 #if MAIN_MODULE
@@ -899,7 +880,7 @@ function createWasm() {
     // TODO(sbc): Read INITIAL_MEMORY out of the wasm file in post-link mode.
     //assert(wasmMemory.buffer.byteLength === {{{ INITIAL_MEMORY }}});
 #endif
-    updateGlobalBufferAndViews(wasmMemory.buffer);
+    updateMemoryViews();
 #endif
 #if !MEM_INIT_IN_WASM
     runMemoryInitializer();
@@ -935,41 +916,18 @@ function createWasm() {
     wasmModule = module;
 #endif
 
-#if WASM_WORKERS
-    if (!ENVIRONMENT_IS_WASM_WORKER) {
-#endif
 #if USE_PTHREADS
-    // Instantiation is synchronous in pthreads and we assert on run dependencies.
-    if (!ENVIRONMENT_IS_PTHREAD) {
-#if PTHREAD_POOL_SIZE
-      var numWorkersToLoad = PThread.unusedWorkers.length;
-      PThread.unusedWorkers.forEach(function(w) { PThread.loadWasmModuleToWorker(w, function() {
-#if !PTHREAD_POOL_DELAY_LOAD
-        // PTHREAD_POOL_DELAY_LOAD==0: we wanted to synchronously wait until the Worker pool
-        // has loaded up. If all Workers have finished loading up the Wasm Module, proceed with main()
-        if (!--numWorkersToLoad) removeRunDependency('wasm-instantiate');
-#endif
-      })});
-#endif
-#if PTHREAD_POOL_DELAY_LOAD || !PTHREAD_POOL_SIZE
-      // PTHREAD_POOL_DELAY_LOAD==1 (or no preloaded pool in use): do not wait up for the Workers to
-      // instantiate the Wasm module, but proceed with main() immediately.
-      removeRunDependency('wasm-instantiate');
-#endif
-    }
+    PThread.loadWasmModuleToAllWorkers(() => removeRunDependency('wasm-instantiate'));
 #else // singlethreaded build:
     removeRunDependency('wasm-instantiate');
 #endif // ~USE_PTHREADS
-#if WASM_WORKERS
-    }
-#endif
 
   }
-  // we can't run yet (except in a pthread, where we have a custom sync instantiator)
-  {{{ runOnMainThread("addRunDependency('wasm-instantiate');") }}}
+  // wait for the pthread pool (if any)
+  addRunDependency('wasm-instantiate');
 
 #if LOAD_SOURCE_MAP
-  {{{ runOnMainThread("addRunDependency('source-map');") }}}
+  {{{ runIfMainThread("addRunDependency('source-map');") }}}
 #endif
 
   // Prefer streaming instantiation if available.
@@ -1143,7 +1101,12 @@ function createWasm() {
       return exports;
     } catch(e) {
       err('Module.instantiateWasm callback failed with error: ' + e);
-      return false;
+      #if MODULARIZE
+        // If instantiation fails, reject the module ready promise.
+        readyPromiseReject(e);
+      #else
+        return false;
+      #endif
     }
   }
 

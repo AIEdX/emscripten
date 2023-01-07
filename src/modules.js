@@ -50,6 +50,7 @@ global.LibraryManager = {
       'library_stack_trace.js',
       'library_wasi.js',
       'library_dylink.js',
+      'library_makeDynCall.js',
       'library_eventloop.js',
     ];
 
@@ -70,6 +71,10 @@ global.LibraryManager = {
       libraries.push('library_memoryprofiler.js');
     }
 
+    if (AUTODEBUG) {
+      libraries.push('library_autodebug.js');
+    }
+
     if (FILESYSTEM) {
       // Core filesystem libraries (always linked against, unless -sFILESYSTEM=0 is specified)
       libraries = libraries.concat([
@@ -86,6 +91,8 @@ global.LibraryManager = {
           libraries.push('library_nodefs.js');
         }
         libraries.push('library_noderawfs.js');
+        // NODERAWFS overwrites library_path.js
+        libraries.push('library_nodepath.js');
       }
     } else if (WASMFS) {
       libraries.push('library_wasmfs.js');
@@ -205,26 +212,17 @@ global.LibraryManager = {
       }
       try {
         processed = processMacros(preprocess(src, filename));
-        eval(processed);
+        vm.runInThisContext(processed, { filename: filename.replace(/\.\w+$/, '.preprocessed$&') });
       } catch (e) {
-        const details = [e, e.lineNumber ? `line number: ${e.lineNumber}` : ''];
+        error(`failure to execute js library "${filename}":`);
         if (VERBOSE) {
-          details.push((e.stack || '').toString().replace('Object.<anonymous>', filename));
-        }
-        if (processed) {
-          error(`failure to execute js library "${filename}": ${details}`);
-          if (VERBOSE) {
+          if (processed) {
             error(`preprocessed source (you can run a js engine on this to get a clearer error message sometimes):\n=============\n${processed}\n=============`);
           } else {
-            error('use -sVERBOSE to see more details');
+            error(`original source:\n=============\n${src}\n=============`);
           }
         } else {
-          error(`failure to process js library "${filename}": ${details}`);
-          if (VERBOSE) {
-            error(`original source:\n=============\n${src}\n=============`);
-          } else {
-            error('use -sVERBOSE to see more details');
-          }
+          error('use -sVERBOSE to see more details');
         }
         throw e;
       } finally {
@@ -306,6 +304,11 @@ function addMissingLibraryStubs() {
 function exportRuntime() {
   const EXPORTED_RUNTIME_METHODS_SET = new Set(EXPORTED_RUNTIME_METHODS);
 
+  const legacyRuntimeElements = new Map([
+    ['print', 'out'],
+    ['printErr', 'err'],
+  ]);
+
   // optionally export something.
   // in ASSERTIONS mode we show a useful error if it is used without
   // being exported. how we show the message depends on whether it's
@@ -318,10 +321,8 @@ function exportRuntime() {
       if (isFSPrefixed(exported)) {
         // this is a filesystem value, FS.x exported as FS_x
         exported = 'FS.' + exported.substr(3);
-      } else if (exported === 'print') {
-        exported = 'out';
-      } else if (exported === 'printErr') {
-        exported = 'err';
+      } else if (legacyRuntimeElements.has(exported)) {
+        exported = legacyRuntimeElements.get(exported);
       }
       return `Module["${name}"] = ${exported};`;
     }
@@ -356,18 +357,17 @@ function exportRuntime() {
     'registerFunctions',
     'prettyPrint',
     'getCompilerSetting',
-    'print',
-    'printErr',
+    'out',
+    'err',
     'callMain',
     'abort',
     'keepRuntimeAlive',
     'wasmMemory',
-    // These last three are actually native wasm functions these days but we
-    // allow exporting them via EXPORTED_RUNTIME_METHODS for backwards compat.
-    'stackSave',
-    'stackRestore',
-    'stackAlloc',
   ];
+
+  // These are actually native wasm functions these days but we allow exporting
+  // them via EXPORTED_RUNTIME_METHODS for backwards compat.
+  runtimeElements = runtimeElements.concat(WASM_SYSTEM_EXPORTS);
 
   if (USE_PTHREADS && ALLOW_MEMORY_GROWTH) {
     runtimeElements = runtimeElements.concat([
@@ -409,6 +409,15 @@ function exportRuntime() {
     }
   }
 
+  // Only export legacy runtime elements when explicitly
+  // requested.
+  for (const name of EXPORTED_RUNTIME_METHODS_SET) {
+    if (legacyRuntimeElements.has(name)) {
+      const newName = legacyRuntimeElements.get(name);
+      warn(`deprecated item in EXPORTED_RUNTIME_METHODS: ${name} use ${newName} instead.`);
+      runtimeElements.push(name);
+    }
+  }
 
   // Add JS library elements such as FS, GL, ENV, etc. These are prefixed with
   // '$ which indicates they are JS methods.
